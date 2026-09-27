@@ -15,6 +15,12 @@ window.HubStatus = (() => {
     const online = document.createElement("strong");
     const uptime = document.createElement("span");
     summary.replaceChildren(online, uptime);
+    const foldStorageKey = "skyfire.hub.status.folded.v1";
+    let folded = new Set();
+    try {
+        const saved = JSON.parse(localStorage.getItem(foldStorageKey));
+        if (Array.isArray(saved)) folded = new Set(saved.filter(key => typeof key === "string").slice(-512));
+    } catch (_) { /* Folding still works when browser storage is unavailable. */ }
     const cards = new Map();
     const pending = new Set();
     let callbacks = {}, snapshot = null, timer = null, request = null, controller = null;
@@ -33,8 +39,15 @@ window.HubStatus = (() => {
     }
     function createCard(key) {
         const card = { key };
-        card.article = document.createElement("article");
-        const heading = document.createElement("div");
+        card.article = document.createElement("details");
+        card.article.open = !folded.has(key);
+        card.article.addEventListener("toggle", () => {
+            if (card.article.open) folded.delete(key); else folded.add(key);
+            // Keep preferences bounded even when nodes are frequently replaced.
+            folded = new Set([...folded].slice(-512));
+            try { localStorage.setItem(foldStorageKey, JSON.stringify([...folded])); } catch (_) { }
+        });
+        const heading = document.createElement("summary");
         heading.className = "component-heading";
         card.title = document.createElement("h3");
         card.state = document.createElement("span");
@@ -54,7 +67,10 @@ window.HubStatus = (() => {
             card[action] = button;
             card.controls.append(button);
         }
-        card.article.append(heading, card.detail, card.metrics, card.controls);
+        const body = document.createElement("div");
+        body.className = "component-body";
+        body.append(card.detail, card.metrics, card.controls);
+        card.article.append(heading, body);
         return card;
     }
     function updateCard(card, component, data) {
