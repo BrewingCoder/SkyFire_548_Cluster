@@ -5,7 +5,9 @@ if(WIN32)
   list(APPEND chatserver_sources ${sources_windows_Debugging} chatserver.rc chatserver.ico)
 endif()
 add_executable(chatserver ${chatserver_sources})
-target_compile_definitions(chatserver PRIVATE BOOST_JSON_NO_LIB BOOST_JSON_STATIC_LINK)
+# JSON's PMR headers also trigger Container auto-linking on MSVC. The bundled
+# JSON implementation uses its own memory resource, so neither binary is needed.
+target_compile_definitions(chatserver PRIVATE BOOST_JSON_NO_LIB BOOST_JSON_STATIC_LINK BOOST_CONTAINER_NO_LIB)
 add_dependencies(chatserver revision.h)
 target_include_directories(chatserver PRIVATE
   ${CMAKE_BINARY_DIR}

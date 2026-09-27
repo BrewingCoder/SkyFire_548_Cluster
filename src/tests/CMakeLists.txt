@@ -1068,7 +1068,7 @@ target_include_directories(chat_routing_tests PRIVATE ${CMAKE_SOURCE_DIR}/src/se
 add_test(NAME chat_routing_tests COMMAND chat_routing_tests)
 
 add_executable(social_snapshot_tests SocialSnapshotTests.cpp)
-target_compile_definitions(social_snapshot_tests PRIVATE BOOST_JSON_NO_LIB BOOST_JSON_STATIC_LINK)
+target_compile_definitions(social_snapshot_tests PRIVATE BOOST_JSON_NO_LIB BOOST_JSON_STATIC_LINK BOOST_CONTAINER_NO_LIB)
 target_include_directories(social_snapshot_tests PRIVATE ${CMAKE_SOURCE_DIR}/src/server/shared ${CMAKE_SOURCE_DIR}/src/server/chatserver ${Boost_INCLUDE_DIRS})
 if(TARGET Boost::headers)
   target_link_libraries(social_snapshot_tests Boost::headers)
