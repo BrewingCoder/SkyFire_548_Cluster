@@ -805,7 +805,7 @@ std::string HubWebServer::HandleStatus(std::map<std::string, std::string> const&
         if (node.Type == Skyfire::Cluster::Service::Map || node.Type == Skyfire::Cluster::Service::Character || node.Type == Skyfire::Cluster::Service::Chat)
         {
             appendDataMetrics(&node,uint8(node.Type));
-            json << ",\"canRestart\":" << (node.Type == Skyfire::Cluster::Service::Map && (node.Capabilities & 512) ? "true" : "false")
+            json << ",\"canRestart\":" << ((node.Type == Skyfire::Cluster::Service::Map || node.Type == Skyfire::Cluster::Service::Character) && (node.Capabilities & 512) ? "true" : "false")
                  << ",\"state\":\"" << (!node.Live ? "offline" : node.Ready ? "running" : "starting") << "\"";
         }
         json << '}';

@@ -46,6 +46,26 @@ def rows(payload):
 
 
 class ProtocolTests(unittest.TestCase):
+    def test_character_restart_requires_a_valid_ready_acknowledgement(self):
+        from characterserver import hub_exchange, RestartRequested
+        class Writer:
+            def write(self, data):
+                pass
+            async def drain(self):
+                pass
+        async def check(kind, reply, request, lease):
+            reader = asyncio.StreamReader()
+            reader.feed_data(b'SFHC' + struct.pack('!HHIHI', 1, reply, 6, request, lease))
+            reader.feed_eof()
+            return await hub_exchange(reader, Writer(), kind, b'')
+        self.assertEqual(asyncio.run(check(2, 0x8000, 2, 15)), 15)
+        with self.assertRaises(RestartRequested):
+            asyncio.run(check(2, 0x8004, 2, 15))
+        for kind, request, lease in [(1, 1, 15), (2, 1, 15), (2, 2, 0)]:
+            with self.assertRaises(RuntimeError):
+                asyncio.run(check(kind, 0x8004, request, lease))
+
+
     def test_create_and_update_share_the_same_character_state_layout(self):
         entries = {entry['name']:entry['sql'] for entry in catalog(ROOT)}
         create = re.search(r'\((.*?)\) VALUES',entries['CHAR_INS_CHARACTER'])[1].replace(' ','').lower().split(',')

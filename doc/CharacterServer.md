@@ -209,3 +209,9 @@ active-session draining, competing ownership, and lost commit acknowledgements.
 The test runner accepts --database-config pointing to a private config containing
 VerificationDatabaseInfo (or HubDatabaseInfo); tests create and remove only their
 randomly named skyfire_character_test_* fixture schema.
+
+### Restart from the hub web console
+
+The character-service status card offers Restart for both hub-managed services and externally launched daemons advertising restart capability. Stop all worlds gracefully and wait for their cluster registrations to expire first. Backup maintenance also blocks this operation. The external daemon refuses to restart while clients or requests remain attached, closes its listener and database ownership lock, then reloads the Python process and configuration. A failed database connection does not prevent an otherwise idle daemon from being restarted.
+
+After installing this feature, restart an existing external character process once manually so it advertises the new capability; rebuild the hub as well. No database migration or configuration change is required. The hub stays online. An offline externally launched daemon still needs its launcher to start it.

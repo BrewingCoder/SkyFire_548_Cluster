@@ -241,7 +241,7 @@ private:
             if (node.Build != 18414 || (node.Capabilities & ~std::uint32_t(4095)) ||
                 (node.Type == Service::Auth && (node.Capabilities & (776 | 1024 | 2048))) ||
                 (node.Type == Service::World && (node.Capabilities & (944 | 1024 | 2048))) ||
-                (node.Type == Service::Character && node.Capabilities != 1024) ||
+                (node.Type == Service::Character && node.Capabilities != 1024 && node.Capabilities != (1024 | MapData::RestartCapability)) ||
                 (node.Type == Service::Chat && node.Capabilities != Skyfire::Chat::Capability) ||
                 (node.Type == Service::Map && (node.Capabilities != MapData::Capability && node.Capabilities != (MapData::Capability | MapData::RestartCapability))))
             { Reject(Error::Version, "Requires client build 18414 and supported service capabilities."); return; }
@@ -291,7 +291,7 @@ private:
     {
         Writer payload; payload.U16(std::uint16_t(_header.Type)); payload.U32(_server._leaseSeconds);
         auto restart = _server._mapRestarts.find(_key);
-        if (!close && _header.Type == Message::Heartbeat && restart != _server._mapRestarts.end() && restart->second == _owner)
+        if (!close && (_header.Type == Message::Heartbeat || _header.Type == Message::Ready) && restart != _server._mapRestarts.end() && restart->second == _owner)
         {
             _server._mapRestarts.erase(restart);
             Write(Frame(MapData::RestartReply, payload), true); return;
@@ -331,6 +331,21 @@ private:
 
 HubClusterServer::HubClusterServer() : _tls(boost::asio::ssl::context::tls_server), _acceptor(_io), _handoffs(Handoff::RandomToken) { }
 HubClusterServer::~HubClusterServer() { Close(); }
+bool HubClusterServer::RestartCharacter(std::string const& key, std::string& error)
+{
+    for (auto const& node : _registry.Snapshot())
+        if (node.Key == key && node.Type == Service::Character && node.Live && node.ExpiresAt > Now())
+        {
+            if (!(node.Capabilities & MapData::RestartCapability))
+            { error = "Restart the character service once with the updated script to enable web restarts."; return false; }
+            if (!_mapRestarts.emplace(key, node.Owner).second)
+            { error = "Character service restart is already queued."; return false; }
+            SF_LOG_INFO("server.hub", "Restart queued for character service '%s'.", key.c_str());
+            return true;
+        }
+    error = "Character service is offline."; return false;
+}
+
 bool HubClusterServer::RestartMap(std::string const& key, std::string& error)
 {
     for (auto const& node : _registry.Snapshot())

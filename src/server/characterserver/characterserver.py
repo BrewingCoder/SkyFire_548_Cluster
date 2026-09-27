@@ -6,6 +6,8 @@ import asyncio
 import contextlib
 from concurrent.futures import ThreadPoolExecutor
 import ipaddress
+import os
+import subprocess
 from pathlib import Path
 import re
 import signal
@@ -29,15 +31,28 @@ def identity(certificate):
     return names[0]
 
 
+class RestartRequested(Exception):
+    pass
+
+
+def restart_process(config):
+    args = [sys.executable, '-B', str(Path(__file__).resolve()), '--config', str(Path(config).resolve())]
+    if os.name == 'nt':
+        args = [subprocess.list2cmdline([arg]) for arg in args]
+    os.execv(sys.executable, args)
+
+
 async def hub_exchange(reader, writer, kind, body):
     writer.write(b'SFHC' + struct.pack('!HHI',1,kind,len(body)) + body)
     await writer.drain()
     magic,version,reply,size = struct.unpack('!4sHHI', await reader.readexactly(12))
-    if magic != b'SFHC' or version != 1 or reply != 0x8000 or size != 6:
+    if magic != b'SFHC' or version != 1 or reply not in (0x8000, 0x8004) or size != 6 or (reply == 0x8004 and kind != 2):
         raise RuntimeError('Hub rejected character service registration')
     request,lease = struct.unpack('!HI', await reader.readexactly(size))
     if request != kind or not 5 <= lease <= 300:
         raise RuntimeError('Invalid hub lease')
+    if reply == 0x8004:
+        raise RestartRequested()
     return lease
 
 
@@ -166,6 +181,7 @@ async def serve(config_file, stop=None, database_factory=CharacterDatabase, chan
                 await asyncio.wait_for(writer.wait_closed(),2)
             tasks.discard(task)
     server = None
+    restart = False
     try:
         server = await asyncio.start_server(client,config.get('bind_address','127.0.0.1'),port,
                                             ssl=incoming,ssl_handshake_timeout=5,limit=MAX_FRAME+4)
@@ -182,7 +198,7 @@ async def serve(config_file, stop=None, database_factory=CharacterDatabase, chan
                     if not 1 <= len(data) <= 255:
                         raise ValueError('Invalid registration string')
                     return struct.pack('!H',len(data))+data
-                registration=text(node)+text(config.get('node_name',node))+b'\4'+text(str(address))+struct.pack('!HIIII',port,0,18414,maximum,1024)
+                registration=text(node)+text(config.get('node_name',node))+b'\4'+text(str(address))+struct.pack('!HIIII',port,0,18414,maximum,1024 | (512 if channel is None else 0))
                 await asyncio.wait_for(hub_exchange(reader,writer,1,registration),5)
                 while not stop.is_set():
                     sent=time.monotonic()
@@ -197,6 +213,14 @@ async def serve(config_file, stop=None, database_factory=CharacterDatabase, chan
                         await asyncio.wait_for(stop.wait(),min(5,lease/3))
                     except asyncio.TimeoutError:
                         pass
+            except RestartRequested:
+                # The hub fences registered worlds; also refuse if a local client is still attached.
+                if clients or metrics.pending:
+                    print('Character restart refused: clients or requests are still active.', flush=True)
+                else:
+                    print('Hub requested character restart; closing database ownership before reloading.', flush=True)
+                    restart = True
+                    stop.set()
             except (OSError,RuntimeError,asyncio.TimeoutError,asyncio.IncompleteReadError):
                 registered_until=0.0
                 print('Character service hub registration unavailable; requests are blocked.',flush=True)
@@ -231,6 +255,8 @@ async def serve(config_file, stop=None, database_factory=CharacterDatabase, chan
             with contextlib.suppress(asyncio.CancelledError):
                 await supervision
 
+    return restart
+
 
 async def main(config, channel=None):
     stop=asyncio.Event()
@@ -240,7 +266,7 @@ async def main(config, channel=None):
             loop.add_signal_handler(sig,stop.set)
         except NotImplementedError:
             signal.signal(sig,lambda *_:loop.call_soon_threadsafe(stop.set))
-    await serve(config,stop,channel=channel)
+    return await serve(config,stop,channel=channel)
 
 
 if __name__ == '__main__':
@@ -249,4 +275,5 @@ if __name__ == '__main__':
     hub_service.arguments(parser)
     args=parser.parse_args()
     channel=hub_service.channel(args,tomllib.loads(Path(args.config).read_text(encoding='utf-8-sig')))
-    asyncio.run(main(args.config,channel))
+    if asyncio.run(main(args.config,channel)):
+        restart_process(args.config)

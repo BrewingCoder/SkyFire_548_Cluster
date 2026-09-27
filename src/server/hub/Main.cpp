@@ -428,7 +428,15 @@ int main(int argc, char** argv)
             {
                 bool applied = false;
                 if (HubNodeRestartActive || HubBackupMaintenance()) error = "Node operations are blocked during maintenance.";
-                else if (webCommand.ClusterAction == "restart") applied = processSupervisor.CheckDataServiceStop(error) && clusterServer.RestartMap(webCommand.ServiceKey,error);
+                else if (webCommand.ClusterAction == "restart") {
+                    if (processSupervisor.CheckDataServiceStop(error))
+                    {
+                        bool character = false;
+                        for (auto const& node : clusterServer.Directory())
+                            if (node.Key == webCommand.ServiceKey && node.Type == Skyfire::Cluster::Service::Character) character = true;
+                        applied = character ? clusterServer.RestartCharacter(webCommand.ServiceKey,error) : clusterServer.RestartMap(webCommand.ServiceKey,error);
+                    }
+                }
                 else applied = clusterServer.SetAdministration(webCommand.ServiceKey, webCommand.ClusterAction, webCommand.Actor, error);
                 webServer.CompleteControlCommand(webCommand,applied);
                 webCommand.DispatchResult->set_value(applied ? "" : error);

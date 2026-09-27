@@ -22,6 +22,7 @@ public:
     bool Open(std::string const& address, std::uint16_t port, std::string const& certificate,
         std::string const& key, std::string const& ca, std::uint32_t leaseSeconds, std::size_t maxConnections);
     void Update();
+    bool RestartCharacter(std::string const& key, std::string& error);
     bool RestartMap(std::string const& key, std::string& error);
     bool HasPendingMapRestarts() const { return !_mapRestarts.empty(); }
     void Close();
