@@ -136,3 +136,56 @@ Channel/guild command integration, invitations, legacy data import, disabling ev
 writer, notification parity and cross-world fan-out remain required before this
 can replace the working routing/admission path. Do not enable it as a substitute
 for those changes.
+
+## Offline legacy import (staging only)
+
+CMake INSTALL includes `characterserver/import_social.py`. It imports custom
+channel settings, password verifiers and bans, plus guild identities, ranks,
+rosters, public/officer notes, MOTD and information. Bank balances, bank permissions,
+inventory and progression stay in the legacy tables. Original rows are never
+modified or deleted. Passwords are converted to independently salted PBKDF2-SHA256
+verifiers; output contains only aggregate counts.
+
+Stop all worlds, chat and character services using the database. From the installed
+character-service directory, first validate with:
+
+```
+python -B import_social.py --config characterserver.toml --offline
+```
+
+The default rolls back without writing destination state. Add `--apply` to commit
+both domains atomically. The importer takes the same database ownership lock as
+characterserver, requires InnoDB and an empty social destination for the configured
+realm, and uses a serializable transaction. An error in either domain rolls back
+both. Existing ownership, receipts, retired incarnations or records prevent a
+second import; it never silently replaces a newer snapshot. A lost commit reply
+requires inspecting the destination before doing anything else.
+
+Import rejects invalid GUIDs, orphaned guild rows, discontinuous ranks, invalid
+leadership, normalized-name collisions, oversized documents and data exceeding
+the native cache bounds. Repair legacy data explicitly before retrying. Channel
+keys are `channel-` plus SHA256 of decimal team, a colon, and NFC/casefolded UTF-8
+name; guild keys are `guild-<id>`. Realm remains the outer SQL partition. Import
+revisions are contiguous per domain, with matching outbox records and a fenced
+`legacy-import` owner that the first authenticated chat owner supersedes.
+
+This is staging, not writer cutover. Do not run it on the live test bed yet or
+enable chat persistence as a result of staging. Continued legacy writes would make
+staged data stale. The eventual cutover must import under the same offline window
+that disables the old writers and activates the new handler adapters.
+
+## Native channel policy model
+
+`chatserver/ChannelState.h` now isolates join/leave, owner handoff, moderation,
+mute, kick/ban/unban, announcements, password-setting validation, invite, list and
+speaking policy from world objects. `channel_state_tests` exercises session fencing,
+permission denial, owner protection, self-kick, candidate-state isolation,
+password/ban checks, faction checks and member limits. Native compilation/testing
+is still operator-owned.
+
+The model is not called by the live protocol yet. It operates on a candidate copy;
+an adapter must commit durable settings through SocialPersistence before publishing
+that copy or notifications. It must authenticate realm and player incarnation,
+resolve targets, verify passwords in a bounded crypto worker, and retain current
+RBAC, visibility, ignore, zone eligibility and notification rules. Channel handler
+cutover, guild policy/handler extraction and cross-world delivery remain unfinished.

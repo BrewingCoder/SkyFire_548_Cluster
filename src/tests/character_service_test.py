@@ -46,6 +46,24 @@ def rows(payload):
 
 
 class ProtocolTests(unittest.TestCase):
+    def test_legacy_social_validation_and_password_hashing(self):
+        from import_social import channel_document, channel_key, guild_document
+        row = ('Private', 469, 1, 1, 'secret', '2 3 2')
+        saved = channel_document(row)
+        self.assertEqual(saved['bans'], [2, 3])
+        self.assertNotIn('secret', json.dumps(saved))
+        method, count, salt, digest = saved['password_verifier'].split('$')
+        self.assertEqual(method, 'pbkdf2-sha256')
+        self.assertEqual(hashlib.pbkdf2_hmac('sha256', b'secret', bytes.fromhex(salt), int(count)).hex(), digest)
+        self.assertEqual(channel_key('PRIVATE', 469), channel_key('private', 469))
+        self.assertNotEqual(channel_key('private', 469), channel_key('private', 67))
+        with self.assertRaises(ValueError):
+            channel_document(('Private', 469, 1, 1, '', 'not-a-guid'))
+        with self.assertRaises(ValueError):
+            guild_document((1, 'Guild', 7, '', ''), [(1, 'Leader', 0)], [(7, 0, '', '')])
+        with self.assertRaises(ValueError):
+            guild_document((1, 'Guild', 7, '', ''), [(0, 'Leader', 0)], [(7, 0, '', ''), (8, 0, '', '')])
+
     def test_character_restart_requires_a_valid_ready_acknowledgement(self):
         from characterserver import hub_exchange, RestartRequested
         class Writer:
@@ -184,6 +202,55 @@ class DatabaseTests(unittest.TestCase):
             with cls.admin.cursor() as cursor:
                 cursor.execute('DROP DATABASE `'+cls.schema+'`')
             cls.admin.close()
+
+    def test_legacy_social_import_is_offline_atomic_and_non_destructive(self):
+        from import_social import stage, DESTINATION_TABLES
+        # Realm 71 is isolated from the existing realm-1 social tests.
+        with self.admin.cursor() as cursor:
+            cursor.execute('CREATE TABLE channels (name VARCHAR(128), team INT, announce INT, ownership INT, password VARCHAR(32), bannedList TEXT) ENGINE=InnoDB')
+            cursor.execute('CREATE TABLE guild (guildid INT, name VARCHAR(24), leaderguid INT, motd VARCHAR(128), info TEXT) ENGINE=InnoDB')
+            cursor.execute('CREATE TABLE guild_rank (guildid INT, rid INT, rname VARCHAR(20), rights INT) ENGINE=InnoDB')
+            cursor.execute('CREATE TABLE guild_member (guildid INT, guid INT, member_rank INT, pnote VARCHAR(31), offnote VARCHAR(31)) ENGINE=InnoDB')
+            cursor.execute("INSERT INTO channels VALUES('Private',469,1,1,'secret','7 8')")
+            cursor.execute("INSERT INTO guild VALUES(5,'Guild',7,'Welcome','Guild info')")
+            cursor.execute("INSERT INTO guild_rank VALUES(5,0,'Leader',255),(5,1,'Member',64)")
+            cursor.execute("INSERT INTO guild_member VALUES(5,7,0,'public','private'),(5,8,1,'','')")
+        db = CharacterDatabase(self.config, SERVICE/'statements.json')
+        try:
+            with self.assertRaises(RuntimeError):
+                stage(self.admin, 71)
+        finally:
+            db.close()
+        self.assertEqual(stage(self.admin, 71), {'channels': 1, 'guilds': 1})
+        with self.admin.cursor() as cursor:
+            cursor.execute('SELECT COUNT(*) FROM character_social_records WHERE realm=71')
+            self.assertEqual(cursor.fetchone()[0], 0)
+            # Fail after the channel has been staged to prove cross-domain rollback.
+            cursor.execute("CREATE TRIGGER fail_social_import BEFORE INSERT ON character_social_outbox FOR EACH ROW BEGIN IF NEW.realm=71 AND NEW.domain='guilds' THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='fixture'; END IF; END")
+        try:
+            with self.assertRaises(Exception):
+                stage(self.admin, 71, True)
+            with self.admin.cursor() as cursor:
+                for table in DESTINATION_TABLES:
+                    cursor.execute('SELECT COUNT(*) FROM ' + table + ' WHERE realm=71')
+                    self.assertEqual(cursor.fetchone()[0], 0)
+        finally:
+            with self.admin.cursor() as cursor:
+                cursor.execute('DROP TRIGGER fail_social_import')
+        self.assertEqual(stage(self.admin, 71, True), {'channels': 1, 'guilds': 1})
+        with self.admin.cursor() as cursor:
+            cursor.execute("SELECT document FROM character_social_records WHERE realm=71 AND domain='guilds'")
+            saved = json.loads(cursor.fetchone()[0])
+            self.assertEqual(saved['members'][0]['officer_note'], 'private')
+            cursor.execute("SELECT revision FROM character_social_owners WHERE realm=71 ORDER BY domain")
+            self.assertEqual(cursor.fetchall(), ((1,), (1,)))
+            cursor.execute('SELECT password FROM channels')
+            self.assertEqual(cursor.fetchone()[0], 'secret')
+        with self.assertRaises(RuntimeError):
+            stage(self.admin, 71, True)
+        # The importer released ownership after both success and failed transactions.
+        db = CharacterDatabase(self.config, SERVICE/'statements.json')
+        db.close()
 
     def test_idle_timeout_recovers_with_fresh_ownership(self):
         db = CharacterDatabase(self.config, SERVICE/'statements.json')

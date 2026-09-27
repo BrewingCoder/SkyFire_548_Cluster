@@ -1,6 +1,6 @@
 # This file is part of Project SkyFire https://www.projectskyfire.org.
 # See LICENSE.md file for Copyright information
-set(chatserver_sources Main.cpp ChatServer.cpp ChatServer.h SocialPersistence.cpp SocialPersistence.h SocialSnapshot.h)
+set(chatserver_sources Main.cpp ChatServer.cpp ChatServer.h SocialPersistence.cpp SocialPersistence.h SocialSnapshot.h ChannelState.h)
 if(WIN32)
   list(APPEND chatserver_sources ${sources_windows_Debugging} chatserver.rc chatserver.ico)
 endif()

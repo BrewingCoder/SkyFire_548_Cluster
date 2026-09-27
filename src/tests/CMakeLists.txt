@@ -1076,3 +1076,7 @@ elseif(TARGET Boost::boost)
   target_link_libraries(social_snapshot_tests Boost::boost)
 endif()
 add_test(NAME social_snapshot_tests COMMAND social_snapshot_tests)
+
+add_executable(channel_state_tests ChannelStateTests.cpp)
+target_include_directories(channel_state_tests PRIVATE ${CMAKE_SOURCE_DIR}/src/server/chatserver)
+add_test(NAME channel_state_tests COMMAND channel_state_tests)
