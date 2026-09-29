@@ -35,8 +35,8 @@ def exercise(test, admin, config):
                 cursor.execute(statement)
             migrations = [path.read_text() for folder in ('pending_updates', 'updates')
                           for path in (root / 'sql' / folder / 'characters').glob('*.sql')
-                          if re.search(r'CREATE TABLE character_social_(owners|guild_members|consumed_items) \(', path.read_text())]
-            test.assertEqual(len(migrations), 3)
+                          if re.search(r'CREATE TABLE character_social_(owners|guild_members|consumed_items|leases) \(', path.read_text())]
+            test.assertEqual(len(migrations), 4)
             for migration in migrations:
                 for statement in migration.split(';'):
                     if statement.strip():

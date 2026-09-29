@@ -154,7 +154,7 @@ int main(int argc, char** argv)
 #else
     std::signal(SIGPIPE, SIG_IGN);
 #endif
-    bool registered = false;
+    std::string serviceStatus;
     if (control) channel.SendStatus(Skyfire::HubControl::StartingMessage);
     SF_LOG_INFO("server.chat", "Chat listening; authenticated realm-scoped messaging and social service requests enabled.");
     auto heartbeat = std::chrono::steady_clock::now();
@@ -165,18 +165,19 @@ int main(int argc, char** argv)
         {
             auto const tick = std::uint64_t(std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::steady_clock::now().time_since_epoch()).count());
+            server.Update(); // Fence old-owner sockets and presence before authority completions.
             auto const completions = server.GetPersistence().TakeResults();
             channels.Update(tick, completions);
             for (auto const& completion : completions)
                 guilds.Complete(completion);
-            server.Update();
             {
                 std::lock_guard<std::mutex> lock(sampleMutex);
                 sample.Chat = server.Metrics(); sample.Load = sample.Chat.Connections; sample.Ready = server.Ready();
             }
-            bool const current = agent.IsRegistered() && server.Ready();
-            if (control && current != registered)
-            { channel.SendStatus(current ? Skyfire::HubControl::ReadyMessage : "NOT_READY"); registered = current; }
+            std::string const current = agent.IsRegistered() && server.Ready() ? Skyfire::HubControl::ReadyMessage :
+                agent.IsRegistered() && server.GetPersistence().Standby() ? "STANDBY" : "NOT_READY";
+            if (control && current != serviceStatus)
+            { channel.SendStatus(current.c_str()); serviceStatus = current; }
             auto now = std::chrono::steady_clock::now();
             if (control && now - heartbeat >= std::chrono::seconds(1))
             { if (!channel.SendStatus(Skyfire::HubControl::HeartbeatMessage)) break; heartbeat = now; }

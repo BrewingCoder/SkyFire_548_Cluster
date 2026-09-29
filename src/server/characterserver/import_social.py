@@ -13,7 +13,7 @@ from social_store import document, integer, guild_membership
 MAX_RECORDS = 8192
 MAX_BYTES = 4 * 1024 * 1024
 SOURCE_TABLES = ('channels', 'guild', 'guild_rank', 'guild_member')
-DESTINATION_TABLES = tuple('character_social_' + name for name in ('owners', 'records', 'outbox', 'receipts', 'retired', 'guild_members', 'consumed_items'))
+DESTINATION_TABLES = tuple('character_social_' + name for name in ('owners', 'records', 'outbox', 'receipts', 'retired', 'guild_members', 'consumed_items', 'leases', 'commands'))
 
 
 def channel_name(name):

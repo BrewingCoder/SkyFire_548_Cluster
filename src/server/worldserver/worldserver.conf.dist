@@ -2,7 +2,7 @@
 #   SkyFire World Server configuration file    #
 ################################################
 [worldserver]
-ConfVersion = 2026272807
+ConfVersion = 2026272808
 
 ###################################################################################################
 # SECTION INDEX
@@ -3443,6 +3443,12 @@ ChatService.Enable = 0
 ChatService.Host = "127.0.0.1"
 ChatService.Port = 54940
 ChatService.NodeKey = "skyfire-chat-primary"
+# Optional authenticated standby. Both chat daemons must use the same durable
+# character-service storage and realm authorization. Empty Host disables failover.
+# Private operations with an unknown result are reconciled, never blindly replayed.
+ChatService.Standby.Host = ""
+ChatService.Standby.Port = 54941
+ChatService.Standby.NodeKey = "skyfire-chat-standby"
 # Relay ordinary client whispers through chatserver. Requires matching world/chat builds
 # and explicit Chat.WorldRealms authorization. Disabled retains the local handler.
 ChatService.Whispers = 0

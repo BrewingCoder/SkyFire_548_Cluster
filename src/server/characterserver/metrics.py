@@ -46,7 +46,7 @@ class Metrics:
             self.reads += 1
         else:
             self.writes += 1
-            self.transactions += operation in (3, 5, 18)
+            self.transactions += operation in (3, 5, 18, 21)
             self.last_commit = time.monotonic()
 
     def packet(self, connections, healthy):

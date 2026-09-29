@@ -95,6 +95,11 @@ namespace Skyfire::Chat
         };
         std::map<std::pair<std::uint32_t, std::string>, Entry> _entries;
     public:
+        void ClearRealm(std::uint32_t realm)
+        {
+            for (auto it = _entries.begin(); it != _entries.end();)
+                if (it->first.first == realm) it = _entries.erase(it); else ++it;
+        }
         void Expire(std::uint64_t now)
         {
             for (auto it = _entries.begin(); it != _entries.end();)

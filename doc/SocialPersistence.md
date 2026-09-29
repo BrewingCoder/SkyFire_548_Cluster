@@ -13,8 +13,9 @@ Keep all worlds and social daemons for the realm stopped throughout the import.
 Back up the character database and configurations first.
 
 1. Apply the character social migrations through the existing database update
-   workflow: `001_social_domain_store.sql`, `002_social_guild_membership.sql` and
-   `003_social_consumed_items.sql` (or their promoted release names).
+   workflow: `001_social_domain_store.sql`, `002_social_guild_membership.sql`,
+   `003_social_consumed_items.sql` and `004_social_failover.sql` (or their promoted
+   release names). Existing authority stores need the new migration, not a reimport.
 2. Run `python -B import_social.py --config characterserver.toml --offline` from
    the character-service directory. The default is a dry run and rolls back.
 3. Resolve any reported invalid legacy rows. Repeat with `--apply` to import both
@@ -77,10 +78,21 @@ or create gameplay groups. Cross-world script callbacks cannot receive a remote
 
 ## Persistence and recovery
 
-The character service retains its database advisory lock. Separate channel and
-guild ownership epochs identify the chat certificate node and process incarnation.
-A replacement takes ownership only after prior sessions detach; retired
-incarnations cannot acquire it again.
+The character service retains its database advisory lock. A shared realm lease
+fences both channel and guild ownership to one chat certificate node and process
+incarnation. The database uses a 15-second SQL-time deadline and a monotonically
+increasing ownership epoch. Every social operation checks and renews its lease;
+a replacement may acquire an expired lease even if the former socket has not
+detached. Operations from the old epoch are rejected. A process reattaching after
+expiry must acquire a new epoch and rebuild both domains.
+
+Native readiness has a conservative 10-second budget measured from the start of
+the last successful lease-bearing request. Lease loss clears volatile presence,
+mailboxes, invitations and pending callbacks; no realm serves requests until its
+snapshot and recovery work complete. Overall readiness requires at least one
+owned realm, but probes and operations always verify their specific realm. A
+healthy daemon waiting behind another owner reports standby. See
+[ChatServer.md](ChatServer.md) for the two-endpoint setup.
 
 A mutation commits its record, CAS revision, idempotency receipt, ordered outbox
 and relevant guild projection/index in one transaction. A unique realm/GUID index
@@ -89,13 +101,25 @@ from resurrecting an item during the same world incarnation. Economic fields are
 never accepted as arbitrary social-document fields.
 
 Unknown commit outcomes are not replayed as new commands or executed locally.
-The daemon reconnects exclusively and checks the original durable receipt after
-a lost database reply. World guild projections refresh through bounded read-only
-requests and retain callbacks while querying an uncertain command's status.
-Bank changes are blocked while a social change is pending or its result is
-uncertain. If the chat daemon itself restarts and loses its bounded command-status
-cache, an unresolved world command stays fenced; restart the world to reload its
-committed projection rather than guessing whether a rank removal or creation ran.
+After a lost backend reply, the daemon reconnects under the ownership fence and
+checks its original durable receipt. Guild mutations also atomically store a
+command outcome bound to realm, world certificate node, world generation,
+sequence, account, actor, session incarnation and guild. That immutable outcome
+contains the original revision and projection, including deletion.
+
+World guild projections retain callbacks while querying uncertain commands.
+Status lookup works after the chat daemon dies or a standby takes over, including
+when the original actor has logged out; the authenticated world generation and
+original command identity still must match. A missing lookup writes a terminal
+not-executed record under the owner lock, preventing a delayed original mutation
+from committing later. A world restart is not required to recover the outcome.
+
+Bank changes remain fenced while a social change is pending or uncertain. The
+world will not replace a newer observed projection with an older recovered one;
+after confirmed recovery it refreshes current state before releasing its fence.
+If the backend is unavailable, the operation remains uncertain and fenced rather
+than being guessed or replayed. Outcomes have no time-based expiry while they may
+still be needed by a live world generation.
 
 Queued legacy bank writes lock and validate their guild/rank/member references,
 so a late transaction cannot recreate a disbanded guild's rows. These economic
@@ -110,19 +134,25 @@ must not blindly retry a possibly delivered message.
 ## Character-service wire contract
 
 The existing TLS framing is u32 payload size, followed by the payload. Replies
-start with status byte 0 (success) or 1 (rejection). Strings use u32 byte lengths.
+start with status byte 0 (success), 1 (rejection), or 2 (another live lease owner
+holds the requested realm at attach). Strings use u32 byte lengths.
 World character RPC remains version 2. Social operations are:
 
 - Handshake 16: version 1, realm, 32-hex process incarnation, domain.
 - Snapshot 17: JSON `after` key and page `limit` (maximum 32).
 - Mutation 18: JSON `id`, `key`, `expected`, `actor`, `document`, and optional
-  typed guild `context` for lifecycle/administrative proofs. Response is the
-  committed revision. Actor zero is reserved for attested console operations.
+  typed guild `context` for lifecycle/administrative proofs and optional `command`
+  identity for durable guild outcomes. Response is the committed revision. Actor
+  zero is reserved for attested console operations.
 - Outbox 19: JSON `after` revision and bounded `limit`.
 - Receipt 20: JSON `id`; returns `found` and, when present, the committed revision.
-  Lookup is fenced to the same process incarnation. Exclusive social connections
-  require an old session to finish and detach before reconnecting, so recovery
-  cannot race a still-running mutation from that session.
+  Lookup is fenced to the current owner epoch and serialized against mutations.
+- Command outcome 21: JSON `node`, `generation`, `sequence`, `account`, `actor`,
+  `incarnation` and `guild`. Realm/domain come from the authenticated connection.
+  A committed response contains `found: true`, `revision` and the original
+  `document`; a terminal not-executed response contains `found: false`. Identity
+  mismatches are rejected. A later mutation using either recorded identity is
+  rejected; callers use lookup, not command replay.
 
 Duplicate JSON keys, unsupported fields, invalid UTF-8, out-of-range integers and
 oversized documents are rejected. Documents are limited to 256 KiB; the native

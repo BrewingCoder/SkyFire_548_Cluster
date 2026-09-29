@@ -42,6 +42,8 @@ namespace Skyfire::Chat
     std::vector<ServiceResult> TakeServiceResults();
     std::vector<ServiceEvent> TakeServiceEvents();
     bool ClientEnabled();
+    // Last endpoint that accepted a full presence snapshot; not a readiness guarantee.
+    std::string ClientNodeKey();
     void PublishPresence(std::vector<PlayerPresence> players);
 }
 #endif

@@ -24,6 +24,11 @@ namespace Skyfire::Chat
             Cluster::AgentOptions Options;
             std::uint32_t Realm = 0;
             std::string Generation, ChatKey;
+            std::string ConfirmedNode;
+            bool EventsReady = false;
+            struct Endpoint { std::string Host, Key; std::uint16_t Port; };
+            std::vector<Endpoint> Endpoints;
+            std::size_t Selected = 0;
             std::mutex Lock;
             std::condition_variable Wake;
             std::optional<std::vector<PlayerPresence>> Pending;
@@ -72,7 +77,7 @@ namespace Skyfire::Chat
                 }
                 X509_free(certificate); return valid;
             }
-            bool Send(std::uint16_t operation, Cluster::Writer const& payload, std::vector<std::uint8_t>* routed = nullptr)
+            bool Exchange(std::uint16_t operation, Cluster::Writer const& payload, std::vector<std::uint8_t>* routed)
             {
                 try
                 {
@@ -136,11 +141,19 @@ namespace Skyfire::Chat
                 }
                 catch (std::exception const&) { return false; }
             }
+            bool Send(std::uint16_t operation, Cluster::Writer const& payload, std::vector<std::uint8_t>* routed = nullptr)
+            {
+                bool success = Exchange(operation, payload, routed);
+                if (!success) { std::lock_guard<std::mutex> lock(Lock); EventsReady = false; }
+                return success;
+            }
             void Run()
             {
                 std::uint64_t sequence = 0;
                 bool available = false, first = true, lastRoute = false, lastService = false;
                 auto nextPoll = std::chrono::steady_clock::now();
+                auto nextConnect = nextPoll;
+                std::vector<PlayerPresence> latestPresence;
                 bool eventBacklog = false; unsigned pollBurst = 0;
                 for (;;)
                 {
@@ -148,15 +161,33 @@ namespace Skyfire::Chat
                     std::optional<Queued> whisper;
                     std::optional<RouteQueued> route;
                     std::optional<ServiceQueued> service;
-                    bool poll = false, publish = false;
+                    bool poll = false, publish = false, connect = false;
                     {
                         std::unique_lock<std::mutex> lock(Lock);
-                        Wake.wait_for(lock, std::chrono::milliseconds(100), [&] { return Stopping || Pending.has_value() || !Whispers.empty() || !Routes.empty() || !Services.empty() || (eventBacklog && ServiceEvents.size() < 96 && EventBytes < 1024 * 1024); });
+                        Wake.wait_for(lock, std::chrono::milliseconds(100), [&] { return Stopping || Pending.has_value() || (available && (!Whispers.empty() || !Routes.empty() || !Services.empty() || (eventBacklog && ServiceEvents.size() < 96 && EventBytes < 1024 * 1024))); });
                         if (Stopping) return;
                         auto now = std::chrono::steady_clock::now();
                         while (!Whispers.empty() && now >= Whispers.front().Deadline)
                         { Results.push_back({std::move(Whispers.front().Message), false, Whispers.front().Deadline}); Whispers.pop_front(); }
-                        if (Pending) { snapshot.Players = std::move(*Pending); Pending.reset(); publish = true; }
+                        while (!Services.empty() && now >= Services.front().Deadline)
+                        {
+                            ServiceResult expired; expired.Request = std::move(Services.front().Request); expired.Deadline = Services.front().Deadline;
+                            expired.Response = {expired.Request.Sequence, ServiceStatus::Unavailable, {}};
+                            ServiceResults.push_back(std::move(expired)); Services.pop_front();
+                        }
+                        while (!Routes.empty() && now >= Routes.front().Deadline)
+                        {
+                            auto& expired = Routes.front(); RouteResult result;
+                            result.Account = expired.Message.Account; result.Lane = expired.Lane; result.Sequence = expired.Message.Sequence; result.Deadline = expired.Deadline;
+                            RouteResults.push_back(std::move(result)); Routes.pop_front();
+                        }
+                        if (Pending) { latestPresence = std::move(*Pending); Pending.reset(); publish = true; }
+                        if (!available)
+                        {
+                            if (now < nextConnect) continue;
+                            connect = true; publish = false;
+                        }
+                        else if (publish) snapshot.Players = latestPresence;
                         else if (available && (eventBacklog || now >= nextPoll) && ServiceEvents.size() < 96 && EventBytes < 1024 * 1024 &&
                             (pollBurst < 4 || (Services.empty() && Routes.empty() && Whispers.empty()))) poll = true;
                         else if (!Services.empty() && (!lastService || (Routes.empty() && Whispers.empty())))
@@ -164,7 +195,33 @@ namespace Skyfire::Chat
                         else if (!Routes.empty() && (Whispers.empty() || !lastRoute)) { route = std::move(Routes.front()); Routes.pop_front(); lastRoute = true; lastService = false; pollBurst = 0; }
                         else if (!Whispers.empty()) { whisper = std::move(Whispers.front()); Whispers.pop_front(); lastRoute = false; lastService = false; pollBurst = 0; }
                         else if (!Services.empty()) { service = std::move(Services.front()); Services.pop_front(); lastService = true; pollBurst = 0; }
-                        if (!publish && !service && !route && !whisper && !poll) continue;
+                        if (!connect && !publish && !service && !route && !whisper && !poll) continue;
+                    }
+                    if (connect)
+                    {
+                        auto previous = Selected;
+                        for (std::size_t offset = 0; offset < Endpoints.size(); ++offset)
+                        {
+                            { std::lock_guard<std::mutex> lock(Lock); if (Stopping) return; }
+                            auto candidate = (previous + offset) % Endpoints.size();
+                            auto const& endpoint = Endpoints[candidate];
+                            Options.Host = endpoint.Host; Options.Port = endpoint.Port; ChatKey = endpoint.Key;
+                            if (!Send(1, {})) continue; // Readiness is gated by the durable owner lease.
+                            snapshot.Players = latestPresence; snapshot.Generation = Generation; snapshot.Sequence = ++sequence;
+                            if (!Send(2, EncodePresence(snapshot))) continue;
+                            if (candidate != Selected)
+                            {
+                                EventCursor = 0; EventEpoch.assign(64, '0');
+                                // Queued old-owner events must not be delivered after takeover.
+                                std::lock_guard<std::mutex> lock(Lock); ServiceEvents.clear(); EventBytes = 0;
+                            }
+                            Selected = candidate; available = true; eventBacklog = false; pollBurst = 0;
+                            { std::lock_guard<std::mutex> lock(Lock); ConfirmedNode = ChatKey; }
+                            SF_LOG_INFO("server.chat", "Chat owner ready: %s; presence resynchronized.", ChatKey.c_str());
+                            break;
+                        }
+                        nextConnect = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+                        continue;
                     }
                     if (poll)
                     {
@@ -172,15 +229,19 @@ namespace Skyfire::Chat
                         nextPoll = std::chrono::steady_clock::now() + std::chrono::milliseconds(100);
                         Cluster::Writer payload; payload.String(Generation); Write64(payload, EventCursor); payload.String(EventEpoch);
                         std::vector<std::uint8_t> bytes;
-                        if (!Send(6, payload, &bytes)) { eventBacklog = false; pollBurst = 0; continue; }
+                        if (!Send(6, payload, &bytes)) { available = false; eventBacklog = false; pollBurst = 0; continue; }
                         Cluster::Reader in(bytes); std::string epoch; std::uint64_t cursor; std::uint16_t count;
                         std::vector<ServiceEvent> events;
                         bool valid = in.String(epoch, 64) && ServiceGeneration(epoch) && Read64(in, cursor) && in.U16(count) && count <= 32;
                         auto previous = epoch == EventEpoch ? EventCursor : 0;
                         for (unsigned i = 0; valid && i < count; ++i)
                         { ServiceEvent event; valid = ReadServiceEvent(in, event); if (valid) events.push_back(std::move(event)); }
-                        if (!valid || !in.End() || cursor < previous || cursor - previous != count) continue;
+                        if (!valid || !in.End() || cursor < previous || cursor - previous != count)
+                        { available = false; std::lock_guard<std::mutex> lock(Lock); EventsReady = false; continue; }
                         std::lock_guard<std::mutex> lock(Lock);
+                        if (epoch != EventEpoch && EventEpoch != std::string(64, '0'))
+                        { ServiceEvents.clear(); EventBytes = 0; }
+                        EventsReady = true;
                         for (auto& event : events) { EventBytes += event.Payload.size(); ServiceEvents.push_back(std::move(event)); }
                         eventBacklog = count == 32; ++pollBurst;
                         EventEpoch = std::move(epoch); EventCursor = cursor; continue;
@@ -193,7 +254,11 @@ namespace Skyfire::Chat
                             Send(5, EncodeServiceRequest(result.Request), &bytes) && DecodeServiceResponse(bytes, result.Response) &&
                             result.Response.Sequence == result.Request.Sequence;
                         // A missing reply can follow a committed mutation. Never retry or execute locally.
-                        if (!result.Success) { result.Response.Sequence = result.Request.Sequence; result.Response.Status = ServiceStatus::Unknown; }
+                        if (!result.Success)
+                        {
+                            available = false; result.Response.Sequence = result.Request.Sequence; result.Response.Status = ServiceStatus::Unknown;
+                            std::lock_guard<std::mutex> lock(Lock); EventsReady = false;
+                        }
                         std::lock_guard<std::mutex> lock(Lock); ServiceResults.push_back(std::move(result)); continue;
                     }
                     if (route)
@@ -203,11 +268,13 @@ namespace Skyfire::Chat
                         result.Success = std::chrono::steady_clock::now() < route->Deadline &&
                             Send(4, EncodeRoute(route->Projection, route->Message), &recipients) &&
                             std::chrono::steady_clock::now() < route->Deadline && DecodeRecipients(recipients, result.Recipients);
+                        if (!result.Success) { available = false; std::lock_guard<std::mutex> lock(Lock); EventsReady = false; }
                         std::lock_guard<std::mutex> lock(Lock); RouteResults.push_back(std::move(result)); continue;
                     }
                     if (whisper)
                     {
                         bool success = Send(3, EncodeWhisper(whisper->Message)) && std::chrono::steady_clock::now() < whisper->Deadline;
+                        if (!success) { available = false; std::lock_guard<std::mutex> lock(Lock); EventsReady = false; }
                         std::lock_guard<std::mutex> lock(Lock);
                         Results.push_back({std::move(whisper->Message), success, whisper->Deadline});
                         continue;
@@ -241,6 +308,18 @@ namespace Skyfire::Chat
         auto client = std::make_unique<Client>(); client->Options = std::move(options); client->Realm = std::uint32_t(realm);
         client->ChatKey = sConfigMgr->GetStringDefault("ChatService.NodeKey", "skyfire-chat-primary");
         if (!Cluster::ValidKey(client->ChatKey)) { error = "Invalid ChatService.NodeKey."; return false; }
+        client->Endpoints.push_back({client->Options.Host, client->ChatKey, client->Options.Port});
+        auto standbyHost = sConfigMgr->GetStringDefault("ChatService.Standby.Host", "");
+        auto standbyKey = sConfigMgr->GetStringDefault("ChatService.Standby.NodeKey", "");
+        int standbyPort = sConfigMgr->GetIntDefault("ChatService.Standby.Port", 54941);
+        if (!standbyHost.empty())
+        {
+            if (standbyHost.empty() || standbyHost.size() > 255 || !Cluster::ValidUtf8(standbyHost) ||
+                !Cluster::ValidKey(standbyKey) || standbyKey == client->ChatKey || standbyPort < 1 || standbyPort > 65535 ||
+                (standbyHost == client->Options.Host && standbyPort == client->Options.Port))
+            { error = "Invalid or duplicate ChatService.Standby endpoint/identity."; return false; }
+            client->Endpoints.push_back({std::move(standbyHost), std::move(standbyKey), std::uint16_t(standbyPort)});
+        }
         client->Generation = Cluster::Handoff::RandomToken();
         if (client->Generation.empty()) { error = "Cannot generate chat presence incarnation."; return false; }
         try { client->Worker = std::thread([ptr = client.get()] { ptr->Run(); }); }
@@ -248,6 +327,12 @@ namespace Skyfire::Chat
         Active = std::move(client); return true;
     }
     bool ClientEnabled() { return bool(Active); }
+    std::string ClientNodeKey()
+    {
+        if (!Active) return {};
+        std::lock_guard<std::mutex> lock(Active->Lock);
+        return Active->ConfirmedNode;
+    }
     void PublishPresence(std::vector<PlayerPresence> players)
     {
         if (!Active) return;
@@ -357,6 +442,7 @@ namespace Skyfire::Chat
         std::vector<ServiceEvent> events;
         if (!Active) return events;
         std::lock_guard<std::mutex> lock(Active->Lock);
+        if (!Active->EventsReady) return events;
         while (!Active->ServiceEvents.empty() && events.size() < 32)
         {
             Active->EventBytes -= Active->ServiceEvents.front().Payload.size();

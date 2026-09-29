@@ -46,6 +46,10 @@ namespace Skyfire::Chat
             std::chrono::steady_clock::time_point Updated = std::chrono::steady_clock::now();
         };
         std::map<OutcomeKey, OutcomeRecord> Outcomes;
+        struct LookupRequest { std::uint32_t Realm; std::uint64_t Sequence; ServiceCompletion Completion; };
+        std::map<std::string, LookupRequest> Lookups;
+        void ObserveOwnership(std::uint32_t realm);
+        std::map<std::uint32_t,std::uint64_t> Epochs;
         SocialPersistence& Persistence;
         PresenceCheck Presence;
         Lookup Find;

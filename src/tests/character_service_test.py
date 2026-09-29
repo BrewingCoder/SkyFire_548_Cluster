@@ -189,8 +189,8 @@ class DatabaseTests(unittest.TestCase):
             # CI may promote the pending migration to a dated release filename.
             migrations = [path.read_text() for folder in ('pending_updates', 'updates')
                           for path in (ROOT/'sql'/folder/'characters').glob('*.sql')
-                          if re.search(r'CREATE TABLE character_social_(owners|guild_members|consumed_items) \(', path.read_text())]
-            if len(migrations) != 3:
+                          if re.search(r'CREATE TABLE character_social_(owners|guild_members|consumed_items|leases) \(', path.read_text())]
+            if len(migrations) != 4:
                 raise RuntimeError('Expected social-domain and membership schema migrations')
             for migration in migrations:
                 for statement in migration.split(';'):
@@ -389,6 +389,76 @@ class DatabaseTests(unittest.TestCase):
             with self.assertRaises(RuntimeError): execute(17, {'after': '', 'limit': 1})
             db.social.detach(successor)
         finally:
+            db.close()
+
+    def test_social_failover_lease_and_durable_commands(self):
+        from social_store import canonical
+        cfg = self.config | {'allowed_chat_nodes':['chat-a','chat-b']}
+        db = CharacterDatabase(cfg, SERVICE/'statements.json')
+        first, second = secrets.token_hex(16), secrets.token_hex(16)
+        hello = lambda instance, domain: b'\1'+u32(1)+blob(instance)+blob(domain)
+        rpc = lambda op, value: bytes([op])+blob(canonical(value))
+        sessions = []
+        try:
+            channels, epoch = db.social.attach('chat-a',hello(first,'channels')); sessions.append(channels)
+            with self.assertRaises(ValueError): db.social.attach('chat-b',hello(second,'guilds'))
+            guilds, same = db.social.attach('chat-a',hello(first,'guilds')); sessions.append(guilds)
+            self.assertEqual(same,epoch)
+            execute = lambda op, value: json.loads(db.social.execute('chat-a',guilds,epoch,rpc(op,value)))
+            origin = dict(node='world-a',generation='d'*64,sequence=180001,account=10,actor=19001,incarnation=11,guild=19001)
+            doc = dict(id=19001,name='Recovery',leader=19001,motd='',info='',ranks=[dict(name='Leader',rights=255),dict(name='Member',rights=64)],members=[dict(guid=19001,rank=0,public_note='',officer_note='')])
+            mutation = dict(id=secrets.token_hex(16),key='guild-19001',expected=0,actor=19001,document=doc,command=origin)
+            # Receipt failures roll back the original outcome together with data.
+            with self.admin.cursor() as cursor:
+                cursor.execute("CREATE TRIGGER fail_durable_outcome BEFORE INSERT ON character_social_commands FOR EACH ROW SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='fixture'")
+            try:
+                with self.assertRaises(Exception): execute(18,mutation)
+            finally:
+                with self.admin.cursor() as cursor: cursor.execute('DROP TRIGGER fail_durable_outcome')
+            with self.admin.cursor() as cursor:
+                cursor.execute("SELECT COUNT(*) FROM character_social_records WHERE realm=1 AND record_key='guild-19001'")
+                self.assertEqual(cursor.fetchone()[0],0)
+            revision = execute(18,mutation)['revision']
+            self.assertEqual(execute(21,origin),dict(found=True,revision=revision,document=doc))
+            with self.assertRaises(ValueError): execute(21,origin | {'account':20})
+            with self.assertRaises(ValueError): execute(18,mutation | {'id':secrets.token_hex(16)})
+            missing = origin | {'sequence':180002}
+            self.assertEqual(execute(21,missing),{'found':False})
+            with self.assertRaises(ValueError): execute(18,mutation | {'id':secrets.token_hex(16),'expected':revision,'command':missing})
+            # Expire in SQL, retaining both old sockets to simulate a partition.
+            with self.admin.cursor() as cursor:
+                cursor.execute('UPDATE character_social_leases SET expires=TIMESTAMPADD(SECOND,-1,UTC_TIMESTAMP(6)) WHERE realm=1')
+            with self.assertRaises(ValueError): execute(17,{'after':'','limit':1})
+            successor, next_epoch = db.social.attach('chat-b',hello(second,'guilds')); sessions.append(successor)
+            self.assertGreater(next_epoch,epoch)
+            next_channels, channel_epoch = db.social.attach('chat-b',hello(second,'channels')); sessions.append(next_channels)
+            self.assertEqual(channel_epoch,next_epoch)
+            with self.assertRaises(ValueError): db.social.execute('chat-a',channels,epoch,rpc(19,{'after':0,'limit':1}))
+            recover = lambda value: json.loads(db.social.execute('chat-b',successor,next_epoch,rpc(21,value)))
+            self.assertEqual(recover(origin),dict(found=True,revision=revision,document=doc))
+            self.assertEqual(recover(missing),{'found':False})
+            # Detached stale sockets must not release the successor's lease.
+            db.social.detach(channels); sessions.remove(channels)
+            db.social.detach(guilds); sessions.remove(guilds)
+            with self.assertRaises(ValueError): db.social.attach('chat-a',hello(first,'guilds'))
+            db.social.detach(successor); sessions.remove(successor)
+            db.social.detach(next_channels); sessions.remove(next_channels)
+            renewed, renewed_epoch = db.social.attach('chat-b',hello(second,'guilds')); sessions.append(renewed)
+            self.assertGreater(renewed_epoch,next_epoch)
+            self.assertEqual(json.loads(db.social.execute('chat-b',renewed,renewed_epoch,rpc(21,origin)))['revision'],revision)
+            db.social.execute('chat-b',renewed,renewed_epoch,rpc(18,dict(id=secrets.token_hex(16),key='guild-19001',expected=revision,actor=19001,document=None)))
+            db.db.close()  # A release failure must not strand socket/session cleanup.
+            db.social.detach(renewed); sessions.remove(renewed)
+            self.assertFalse(db.social.sessions)
+            self.assertTrue(db.failed)
+            self.assertTrue(db.health())
+            # The failed release intentionally leaves its SQL lease alive.
+            # Reattach its same identity and release normally so later cases in
+            # this shared disposable schema do not inherit that simulated crash.
+            cleanup, _ = db.social.attach('chat-b',hello(second,'guilds'))
+            sessions.append(cleanup)
+        finally:
+            for session in sessions: db.social.detach(session)
             db.close()
 
     def test_social_guild_membership_is_unique_and_atomic(self):
@@ -762,6 +832,12 @@ class DatabaseTests(unittest.TestCase):
                 await exchange(b'\x10\1'+u32(1)+blob(secrets.token_hex(16))+blob('guilds'))
                 snapshot=json.loads(await exchange(b'\x11'+blob(json.dumps({'after':'','limit':1}))))
                 self.assertIn('records',snapshot)
+                standby_reader,standby_writer=await asyncio.open_connection('127.0.0.1',port,ssl=chat_tls)
+                payload=b'\x10\1'+u32(1)+blob(secrets.token_hex(16))+blob('channels')
+                standby_writer.write(u32(len(payload))+payload); await standby_writer.drain()
+                size=struct.unpack('!I',await asyncio.wait_for(standby_reader.readexactly(4),5))[0]
+                self.assertEqual(await standby_reader.readexactly(size),b'\2')
+                standby_writer.close(); await standby_writer.wait_closed()
                 # A chat identity cannot switch to the world SQL protocol.
                 payload=request(2,[raw('SELECT 1')])
                 writer.write(u32(len(payload))+payload); await writer.drain()

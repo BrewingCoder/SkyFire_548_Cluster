@@ -28,6 +28,8 @@ async def exercise_lost_reply(fixture):
     fixture.assertTrue(fixture.lost_reply['dropped'])
     recovered = False
     for attempt in range(30):
+        if attempt % 5 == 0:
+            print('Lost reply reconciliation attempt',attempt,'receipt queries',fixture.lost_reply['reconciled'],flush=True)
         await asyncio.sleep(0.5)
         try:
             await _refresh(fixture)

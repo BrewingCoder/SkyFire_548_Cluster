@@ -1088,3 +1088,23 @@ add_test(NAME guild_state_tests COMMAND guild_state_tests)
 add_executable(chat_service_tests ChatServiceTests.cpp)
 target_include_directories(chat_service_tests PRIVATE ${CMAKE_SOURCE_DIR}/src/server/shared)
 add_test(NAME chat_service_tests COMMAND chat_service_tests)
+
+# Integration driver launched by chat_service_test.py; requires its disposable TLS setup.
+add_executable(chat_failover_client ChatFailoverClient.cpp)
+add_dependencies(chat_failover_client revision.h)
+target_include_directories(chat_failover_client PRIVATE
+  ${CMAKE_BINARY_DIR} ${CMAKE_SOURCE_DIR}/src/server/shared
+  ${CMAKE_SOURCE_DIR}/src/server/shared/Configuration
+  ${CMAKE_SOURCE_DIR}/src/server/shared/Database
+  ${CMAKE_SOURCE_DIR}/src/server/shared/Logging
+  ${CMAKE_SOURCE_DIR}/src/server/shared/Threading
+  ${Boost_INCLUDE_DIRS} ${MYSQL_INCLUDE_DIR} ${OPENSSL_INCLUDE_DIR})
+target_link_libraries(chat_failover_client shared ${MYSQL_LIBRARY} ${OPENSSL_LIBRARIES} ${CMAKE_THREAD_LIBS_INIT})
+if(TARGET Boost::headers)
+  target_link_libraries(chat_failover_client Boost::headers)
+elseif(TARGET Boost::boost)
+  target_link_libraries(chat_failover_client Boost::boost)
+endif()
+if(WIN32)
+  skyfire_copy_windows_runtime_dependencies(chat_failover_client)
+endif()

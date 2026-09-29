@@ -30,6 +30,8 @@ namespace Skyfire::Chat
             std::string Domain, Request;
             Outcome Status;
             std::uint64_t Revision = 0;
+            boost::json::value Document;
+            bool Lookup = false;
         };
         SocialPersistence();
         ~SocialPersistence();
@@ -37,10 +39,13 @@ namespace Skyfire::Chat
         bool Ready() const;
         bool Ready(std::uint32_t realm) const;
         bool Enabled() const;
+        bool Standby() const;
+        std::uint64_t OwnershipEpoch(std::uint32_t realm) const;
         bool Read(std::uint32_t realm, std::string const& domain, std::string const& key, SocialRecord& record) const;
         bool Submit(std::uint32_t realm, std::string const& domain, std::string const& request,
             std::string const& key, std::uint64_t expected, std::uint64_t actor, boost::json::value document,
-            boost::json::value context = nullptr);
+            boost::json::value context = nullptr, boost::json::value command = nullptr);
+        bool LookupCommand(std::uint32_t realm, std::string const& request, boost::json::value command);
         std::vector<Result> TakeResults();
         void Stop();
     private:

@@ -79,7 +79,7 @@ class CharacterDatabase:
                 if config.get('allowed_chat_nodes'):
                     # Opt-in requires the pending schema update. Never silently
                     # provision a partially migrated social domain at startup.
-                    for table in ('owners', 'retired', 'records', 'receipts', 'outbox', 'guild_members', 'consumed_items'):
+                    for table in ('owners', 'retired', 'records', 'receipts', 'outbox', 'guild_members', 'consumed_items', 'leases', 'commands'):
                         cursor.execute('SELECT * FROM character_social_' + table + ' LIMIT 0')
                         cursor.fetchall()
         except BaseException:

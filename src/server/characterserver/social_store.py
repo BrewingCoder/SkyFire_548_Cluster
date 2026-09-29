@@ -10,6 +10,25 @@ from social_projection import project_guild
 DOMAINS = ('channels', 'guilds')
 MAX_DOCUMENT = 256 * 1024
 MAX_REVISION = (1 << 63) - 1
+LEASE_SECONDS = 15
+
+
+class LeaseBusy(ValueError):
+    """A healthy active chat owner currently holds the realm lease."""
+
+
+def command_identity(value):
+    fields(value, 'node generation sequence account actor incarnation guild')
+    if not isinstance(value['node'], str) or not re.fullmatch(r'[A-Za-z0-9_.-]{1,64}', value['node']):
+        raise ValueError('Invalid command world node')
+    if not isinstance(value['generation'], str) or not re.fullmatch(r'[0-9a-f]{64}', value['generation']):
+        raise ValueError('Invalid command world generation')
+    integer(value['sequence'], (1 << 64)-1, 1)
+    integer(value['account'], 0xffffffff)
+    integer(value['actor'], (1 << 64)-1)
+    integer(value['incarnation'], (1 << 64)-1)
+    integer(value['guild'], 0xffffffff, 1)
+    return tuple(value[key] for key in ('node','generation','sequence','account','actor','incarnation','guild'))
 
 
 def canonical(value):
@@ -209,18 +228,17 @@ class SocialStore:
                         # ownership order as character deletion and guild writes.
                         cursor.execute('SELECT realm FROM character_service_owners WHERE realm=%s FOR UPDATE', (realm,))
                         one(cursor)
-                    cursor.execute('SELECT instance FROM character_social_retired WHERE realm=%s AND domain=%s AND instance=%s', (realm, domain, instance))
-                    if one(cursor):
-                        raise ValueError('Retired social incarnation')
+                    cursor.execute('SELECT epoch,node,instance,expires>UTC_TIMESTAMP(6) FROM character_social_leases WHERE realm=%s FOR UPDATE', (realm,))
+                    lease = one(cursor)
+                    if lease and lease[3] and lease[1:3] != (peer,instance):
+                        raise LeaseBusy('Chat realm lease is held by another owner')
+                    lease_epoch = lease[0] if lease and lease[3] else (lease[0]+1 if lease else 1)
+                    cursor.execute('INSERT INTO character_social_leases VALUES(%s,%s,%s,%s,TIMESTAMPADD(SECOND,%s,UTC_TIMESTAMP(6))) ON DUPLICATE KEY UPDATE epoch=VALUES(epoch),node=VALUES(node),instance=VALUES(instance),expires=VALUES(expires)', (realm,lease_epoch,peer,instance,LEASE_SECONDS))
                     cursor.execute('SELECT epoch,node,instance FROM character_social_owners WHERE realm=%s AND domain=%s FOR UPDATE', (realm, domain))
                     owner = one(cursor)
                     if owner and owner[2] == instance and owner[1] != peer:
                         raise ValueError('Social incarnation belongs to another identity')
-                    if owner and owner[1:] != (peer, instance):
-                        if any(key[0] == domain for key in self.sessions):
-                            raise ValueError('Social domain still has attached owner')
-                        cursor.execute('INSERT IGNORE INTO character_social_retired VALUES(%s,%s,%s)', (realm, domain, owner[2]))
-                    epoch = owner[0] if owner and owner[1:] == (peer, instance) else (owner[0]+1 if owner else 1)
+                    epoch = lease_epoch
                     if domain == 'guilds' and not self.sessions.get((domain, instance)):
                         # Upgrade existing staged records under the same ownership lock.
                         # Any invalid/duplicate membership aborts attachment atomically.
@@ -248,6 +266,15 @@ class SocialStore:
                 self.sessions[session] -= 1
                 if not self.sessions[session]:
                     del self.sessions[session]
+                if not any(key[1] == session[1] for key in self.sessions) and not self.database.failed:
+                    try:
+                        with self.database.db.cursor() as cursor:
+                            cursor.execute('UPDATE character_social_leases SET expires=UTC_TIMESTAMP(6) WHERE realm=%s AND instance=%s', (self.database.realm,session[1]))
+                        self.database.db.commit()
+                    except Exception as error:
+                        # Socket cleanup must still finish if the database goes
+                        # away. The bounded SQL lease supplies the release then.
+                        self.database._rollback(error)
 
     def execute(self, peer, session, epoch, payload):
         reader = Reader(payload)
@@ -268,7 +295,12 @@ class SocialStore:
             text(request['after'], 192)
             integer(request['limit'], 32, 1)
         elif operation == 18:
-            fields(request, 'id key expected actor document context' if 'context' in request else 'id key expected actor document')
+            fields(request, 'id key expected actor document'+(' context' if 'context' in request else '')+(' command' if 'command' in request else ''))
+            if 'command' in request:
+                if domain != 'guilds': raise ValueError('Guild command required')
+                command_identity(request['command'])
+                if request['command']['actor'] != request['actor'] or request['key'] != 'guild-'+str(request['command']['guild']):
+                    raise ValueError('Command mutation identity mismatch')
             if 'context' in request and (domain != 'guilds' or not isinstance(request['context'], dict)):
                 raise ValueError('Invalid social context')
             if not isinstance(request['id'], str) or not re.fullmatch('[0-9a-f]{32}', request['id']):
@@ -287,6 +319,9 @@ class SocialStore:
             fields(request, 'id')
             if not isinstance(request['id'], str) or not re.fullmatch('[0-9a-f]{32}', request['id']):
                 raise ValueError('Invalid social receipt identity')
+        elif operation == 21:
+            if domain != 'guilds': raise ValueError('Guild command required')
+            command_identity(request)
         else:
             raise ValueError('Unsupported social operation')
         db = self.database
@@ -303,11 +338,28 @@ class SocialStore:
                         # Absence is allowed for administrative offline mutations.
                         cursor.execute('SELECT realm FROM character_service_owners WHERE realm=%s FOR UPDATE', (db.realm,))
                         one(cursor)
+                    cursor.execute('SELECT epoch,node,instance,expires>UTC_TIMESTAMP(6) FROM character_social_leases WHERE realm=%s FOR UPDATE', (db.realm,))
+                    lease = one(cursor)
+                    if not lease or lease[:3] != (epoch,peer,instance) or not lease[3]:
+                        raise ValueError('Chat realm lease expired or fenced')
+                    cursor.execute('UPDATE character_social_leases SET expires=TIMESTAMPADD(SECOND,%s,UTC_TIMESTAMP(6)) WHERE realm=%s', (LEASE_SECONDS,db.realm))
                     cursor.execute('SELECT epoch,node,instance,revision FROM character_social_owners WHERE realm=%s AND domain=%s FOR UPDATE', (db.realm, domain))
                     owner = one(cursor)
                     if not owner or owner[:3] != (epoch, peer, instance):
                         raise ValueError('Social owner fenced')
-                    if operation == 17:
+                    identity = command_identity(request if operation == 21 else request['command']) if operation == 21 or 'command' in request else None
+                    if identity:
+                        cursor.execute('SELECT account,actor,incarnation,guild,committed,revision,document FROM character_social_commands WHERE realm=%s AND domain=%s AND node=%s AND generation=%s AND sequence=%s', (db.realm,domain)+identity[:3])
+                        outcome = one(cursor)
+                        if outcome and outcome[:4] != identity[3:]:
+                            raise ValueError('Command identity reused')
+                        if operation == 18 and outcome:
+                            raise ValueError('Command already has a terminal outcome')
+                    if operation == 21:
+                        if not outcome:
+                            cursor.execute('INSERT INTO character_social_commands VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,0,NULL,NULL)', (db.realm,domain)+identity)
+                        result = {'found':True,'revision':outcome[5],'document':json.loads(outcome[6]) if outcome[6] is not None else None} if outcome and outcome[4] else {'found':False}
+                    elif operation == 17:
                         cursor.execute('SELECT record_key,revision,document FROM character_social_records WHERE realm=%s AND domain=%s AND record_key>%s ORDER BY record_key LIMIT %s', (db.realm, domain, request['after'].encode(), request['limit']))
                         items = cursor.fetchall()
                         result = {'head': owner[3], 'records': [{'key': key.decode(), 'revision': revision, 'document': json.loads(data) if data is not None else None} for key, revision, data in items]}
@@ -344,6 +396,8 @@ class SocialStore:
                             cursor.execute('INSERT INTO character_social_records VALUES(%s,%s,%s,%s,%s) ON DUPLICATE KEY UPDATE revision=VALUES(revision),document=VALUES(document)', (db.realm, domain, request['key'].encode(), revision, encoded))
                             cursor.execute('INSERT INTO character_social_outbox VALUES(%s,%s,%s,%s,%s,%s)', (db.realm, domain, revision, request['key'].encode(), encoded, request['actor']))
                             cursor.execute('INSERT INTO character_social_receipts VALUES(%s,%s,%s,%s,%s,%s)', (db.realm, domain, request['id'], instance, digest, revision))
+                            if identity:
+                                cursor.execute('INSERT INTO character_social_commands VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,1,%s,%s)', (db.realm,domain)+identity+(revision,encoded))
                             cursor.execute('UPDATE character_social_owners SET revision=%s WHERE realm=%s AND domain=%s', (revision, db.realm, domain))
                             result = {'revision': revision}
                 answer = canonical(result)

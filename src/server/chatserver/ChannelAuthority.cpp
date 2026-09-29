@@ -76,7 +76,26 @@ namespace Skyfire::Chat
         };
         PresenceDirectory& Presence; SocialPersistence& Persistence; Emit EmitEvent;
         std::map<std::pair<std::uint32_t,std::string>,Entry> Entries; std::uint64_t Now=0, LastExpire=0;
+        std::map<std::uint32_t,std::uint64_t> Epochs;
         Impl(PresenceDirectory& presence,SocialPersistence& persistence,Emit emit):Presence(presence),Persistence(persistence),EmitEvent(std::move(emit)){}
+        void ObserveOwnership(std::uint32_t realm)
+        {
+            auto epoch=Persistence.OwnershipEpoch(realm);
+            auto previous=Epochs.find(realm);
+            if(previous!=Epochs.end() && previous->second==epoch) return;
+            Epochs[realm]=epoch;
+            for(auto it=Entries.begin();it!=Entries.end();)
+            {
+                if(it->second.Realm!=realm) { ++it; continue; }
+                auto& entry=it->second;
+                // Never publish an old owner's candidate or invitation. New
+                // ownership reloads the committed document with presence grace.
+                if(entry.Work && !entry.Work->Inviting)
+                    entry.Work->Complete({entry.Work->Request.Sequence,entry.Work->Saving?ServiceStatus::Unknown:ServiceStatus::Unavailable,{}});
+                for(auto& queued:entry.Waiting) queued.Complete({queued.Request.Sequence,ServiceStatus::Unavailable,{}});
+                it=Entries.erase(it);
+            }
+        }
         bool Load(Entry& entry)
         {
             SocialRecord record;
@@ -211,7 +230,7 @@ namespace Skyfire::Chat
     ChannelAuthority::~ChannelAuthority()=default;
     void ChannelAuthority::Handle(std::uint32_t realm,std::string const& node,ServiceRequest const& request,Completion complete)
     {
-        auto& self=*_impl; ChannelCommand command;
+        auto& self=*_impl; self.ObserveOwnership(realm); ChannelCommand command;
         auto actor=self.Presence.Find(realm,node,request.Generation,request.Actor,request.Incarnation,self.Now);
         if(!actor || actor->Account!=request.Account || !DecodeChannelCommand(request.Payload,command)) { complete({request.Sequence,ServiceStatus::Rejected,{}}); return; }
         if(!self.Persistence.Enabled() || !self.Persistence.Ready(realm)) { complete({request.Sequence,ServiceStatus::Unavailable,{}}); return; }
@@ -319,6 +338,7 @@ namespace Skyfire::Chat
     void ChannelAuthority::Update(std::uint64_t now,std::vector<SocialPersistence::Result> const& results)
     {
         auto& self=*_impl; self.Now=now;
+        for(auto const& realm:self.Epochs) self.ObserveOwnership(realm.first);
         for(auto const& result:results) if(result.Domain=="channels")
             for(auto& item:self.Entries)
             {

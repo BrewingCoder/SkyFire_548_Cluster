@@ -114,6 +114,7 @@ window.HubStatus = (() => {
             metrics = component.metricsAvailable
                 ? `Uptime ${formatUptime(component.uptimeSeconds)} · Realms ${(component.chatRealms || []).join(', ')}\nPresent ${component.presencePlayers ?? 0} · Connections ${component.connections} · Requests ${component.requests} · Errors ${component.failures}\nWhisper relays ${component.whisperRelays ?? 0} · Messages ${component.routedMessages ?? 0} / Recipients ${component.routedRecipients ?? 0} / Controls ${component.routedControls ?? 0}`
                 : 'Chat-server metrics unavailable';
+            if (component.state === 'standby') metrics = 'Standby: waiting for realm ownership\n' + metrics;
             card.metrics.title = 'Requests include health, presence, message routing and administrative admission. Route counts do not confirm client delivery or successful command execution. Metrics expire after 15 seconds.';
         }
         text(card.metrics, metrics);

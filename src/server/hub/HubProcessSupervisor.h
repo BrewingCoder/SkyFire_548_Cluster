@@ -118,6 +118,7 @@ private:
         int64 LastExitCode = 0;
         bool Ready = false;
         bool WarmStandby = false;
+        bool ChatStandby = false;
         bool CanSendCommands = false;
         bool CanManageAccounts = false;
         std::function<void(std::string const&)> AccountCallback;

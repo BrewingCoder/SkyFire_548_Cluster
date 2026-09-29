@@ -1,280 +1,144 @@
-# Native clustered chat daemon
+# Clustered chat daemon
 
-The daemon provides realm-scoped presence, message routing and admission of
-channel/guild administration and in-game GM requests. `ChatService.Messages`
-opts worlds into the broader route; the legacy whisper-only option remains.
-World adapters retain client packets, final gameplay/RBAC checks and durable
-social/guild/channel state. Cross-world fanout and durable ownership extraction
-are not implemented yet. See the September 24 routing section below for activation,
-limits and the acceptance matrix. Native compilation and live validation are pending.
+The native chat daemon owns realm-scoped chat routing, channel membership and
+moderation, and guild social administration when the authority options are enabled.
+Character service commits social records, command outcomes and the legacy guild
+projection in one transaction. Worlds retain client packet encoding, spatial and
+group gameplay checks, visibility, ignore filters, RBAC, script callbacks and guild
+bank/item gameplay. Guild recruitment remains world-owned.
 
-## Build and installation
+Guild/officer messages, whispers, party/group messages and channels use the chat
+transport. Addon payloads preserve their byte contents and prefix checks. Guild
+invitations can cross world connections within a realm; the receiving world checks
+faction, ignore, auto-decline and current guild/invitation state. A receiver without
+the guild in its catalog rejects the invitation. Current gameplay fallback uses
+one active world writer per realm, with the standby loading state on promotion.
 
-Reconfigure CMake with `SERVERS` enabled and build/install `chatserver` along with
-the updated hubserver. It uses the existing native Boost/OpenSSL/shared-library
-dependencies, without linking the game library or requiring Python. CMake INSTALL
-ships the executable and `chatserver.conf.dist`; copy the template to
-`chatserver.conf`. Existing live configuration files are not overwritten.
+## Build and initial cutover
 
-The hub must understand service type 5 and capability 2048 before starting chat.
-Older hubs reject that registration. No database schema migration is needed if
-the managed data-service columns from `003_managed_data_services.sql` are present.
+Build and install matching hubserver, chatserver and worldserver binaries and the
+character-service scripts. Chatserver uses the existing Boost/OpenSSL/shared
+libraries and requires neither the game library nor DBC/DB2 files. CMake INSTALL
+ships `chatserver.conf.dist`; existing live configurations are not overwritten.
+Compare templates before updating their `ConfVersion` values.
 
-## Configuration
+For a first authority cutover, stop the realm's worlds and social daemons, back up
+the character database, and follow [SocialPersistence.md](SocialPersistence.md).
+Apply the character social migrations `001_social_domain_store.sql`,
+`002_social_guild_membership.sql`, `003_social_consumed_items.sql`, and
+`004_social_failover.sql` (or their promoted release names). Import legacy social
+state once with the offline importer; do not reimport an existing authority store.
+An already migrated deployment only needs the new pending migrations.
 
-- Give every daemon a unique `Cluster.NodeKey` and matching certificate CN.
-- Configure the hub hostname/port and CA. The node certificate needs clientAuth
-  for hub registration and serverAuth plus an endpoint SAN for world connections.
-  Certificate paths resolve relative to `chatserver.conf`.
-- Set `Chat.BindIP`, `Chat.Port`, and `Cluster.AdvertiseAddress` for the host.
-- Set `Chat.Realms = "1 2"` to serve multiple realms from one daemon. Up to 64
-  distinct positive realm IDs are supported. Zero and duplicate IDs are rejected.
-- `ConfVersion` is checked at startup against the chat serial in `ConfigVersion.h`.
-  Missing or older serials log a warning with the expected version. Compare the
-  shipped defaults before updating the serial; existing configs are never overwritten.
-- Set `Chat.AllowedWorlds` to space-separated exact world certificate CNs, including
-  standby identities as appropriate. An empty list fails startup. This allowlist
-  authorizes health probes; it does not confer player or GM privileges.
-- Set `Chat.WorldRealms = "world-primary=1 world-other=2"` to authorize presence
-  publication for each certificate identity. Identities must also be in
-  `Chat.AllowedWorlds`, and realms must be in `Chat.Realms`. An empty scope list
-  permits health probes only.
-- `Chat.MaxConnections` bounds concurrent TLS sessions (1–128, default 32).
-  `Chat.RequestTimeout` bounds the entire handshake/probe/reply (1–30 seconds).
+Set character `social_guild_projection = true` and include every authorized chat
+certificate identity in `allowed_chat_nodes`. This allowlist is separate from
+world identities. Enable these world settings after the migration:
 
-No DBC/DB2 data files are required for this phase. Region/channel eligibility will
-remain validated by the world adapter using its client-data stores.
-
-## Hub management
-
-Create a `hub_managed_services` row with a unique service key such as `chat`,
-`service_kind=5`, and `cluster_key` matching the chat configuration. Use the native
-chat executable, configuration path and working directory for its launch paths.
-For example, adapt this statement to the installation directory:
-
-```sql
-INSERT INTO hub_managed_services
-  (service_key, name, executable_path, config_path, working_directory,
-   enabled, service_kind, cluster_key)
-VALUES
-  ('chat', 'Chat Primary', 'chatserver.exe', 'chatserver.conf',
-   'C:/SkyFire', 1, 5, 'skyfire-chat-primary');
+```ini
+ChatService.Enable = 1
+ChatService.Messages = 1
+Chat.ChannelAuthority.Enable = 1
+Chat.GuildAuthority.Enable = 1
 ```
 
-On Linux use the installed `chatserver` executable path and the installed config
-directory. Reload managed records with the hub console's `reload db_records` command, then
-use `start chat`, `stop chat`, or `restart chat`. The existing role-checked web
-service controls expose the same actions. The inherited control channel checks
-its launch token; the daemon also checks that the expected cluster key matches
-its configuration before starting.
+`CharacterService.Enable` must also be enabled. Authority settings are fixed for
+the world process lifetime; switching them requires a restart. Do not resume
+legacy social writers after import.
 
-Managed chat can restart while worlds are online. Coordinated Restart all also
-includes managed chat nodes. Unmanaged chat nodes must be operated by their own
-supervisor. Routing drain is not exposed yet; stop/restart interrupts pending requests with bounded failure.
+## Chat configuration and realm authorization
 
-Independent server-health refresh shows uptime, configured realms, connections,
-service requests, published player presence, accepted whisper relays and failures. Metrics expire after 15 seconds; an expired metric is
-unavailable rather than zero. A lost hub registration withdraws managed readiness.
-The current volatile presence service stays online during scheduled database
-backups and does not prevent backup admission. This policy must change before
-chat acquires durable mutations or an outbox.
+Each daemon needs a unique `Cluster.NodeKey` and matching certificate identity.
+Its certificate needs client authentication for hub/character connections, server
+authentication for world connections, and a SAN matching its advertised endpoint.
+Configure the hub endpoint, CA, `Chat.BindIP`, `Chat.Port` and
+`Cluster.AdvertiseAddress`. Certificate paths resolve relative to the chat config.
 
-## Service protocol and realm boundaries
+`Chat.Realms = "1 2"` supports up to 64 positive realm IDs. Configure
+`Chat.AllowedWorlds` with exact world certificate identities and
+`Chat.WorldRealms = "world-primary=1 world-other=2"` with their permitted realms.
+An allowed identity without a realm scope can probe but cannot publish players.
+Standby world identities need their own entries. These permissions do not grant
+player or GM privileges.
 
-The direct endpoint requires mutual TLS and an allowed world certificate CN.
-Health uses one fixed 16-byte request per connection: ASCII `SFCH`, big-endian u16
-version `1`, u16 operation `1` (health), u32 nonzero request ID, and u32 nonzero
-realm ID. A served realm receives the same fields with operation `0x8001`.
-Unknown realms, malformed requests, unsupported versions/operations and
-unauthorized peers are closed. The deadline and connection limit bound retained
-work; the main loop processes at most 64 asynchronous completions per iteration.
+Enable `Chat.Persistence.Enable = 1`. For each realm configure the same durable
+character endpoint on every chat node that can serve that realm:
 
-Hub registration uses realm zero because the daemon may serve multiple realms;
-the chat metrics packet (cluster message 11) reports its actual realm list. This
-does not publish authentication realm routes or grant ownership of those realms.
+```ini
+Chat.Persistence.Realm.1.Host = "127.0.0.1"
+Chat.Persistence.Realm.1.Port = 54930
+Chat.Persistence.Realm.1.NodeKey = "characters-1"
+```
 
-## World presence publication
+Use a numeric character endpoint address and a matching certificate SAN. Worlds
+connect through `ChatService.Host`, `ChatService.Port` and
+`ChatService.NodeKey`, reusing their own cluster certificate and CA. `RealmID`
+must be positive. Warm standby worlds publish presence only after activation.
 
-Deploy matching hubserver, chatserver and worldserver builds for presence metrics
-(version 3). The new hub also accepts versions 1 and 2 from earlier chat daemons.
-Enable `ChatService.Enable = 1` in each participating world configuration and set
-`ChatService.Host`, `ChatService.Port` and `ChatService.NodeKey`. The publisher
-reuses that world's cluster certificate and CA, verifying both endpoint hostname
-and the chat certificate CN. `RealmID` must be explicitly positive. Standby worlds
-start publishing only after active world startup; preloading alone sends no players.
+## Chat standby
 
-Every five seconds, the world thread copies online character identities into a
-bounded snapshot. DNS, TLS and network waits run on a separate worker. Only one
-pending snapshot is retained; newer snapshots replace unsent older ones. There
-are no database writes. Transport failures do not stop world startup, gameplay,
-character saves or local chat. Whispers explicitly configured for relay fail closed. Publication success/failure transitions are logged.
+Run a second chat process with its own configuration, unique node key, certificate,
+listener port and hub managed-service key. Both processes use the same durable
+character backend for each shared realm, and both identities belong in that
+backend's `allowed_chat_nodes`. Give both chat configurations equivalent world
+allowlists and realm scopes. They must not use separate copies of the social DB.
 
-Presence operation 2 uses the same 16-byte header followed by a big-endian u32
-payload length (maximum 512 KiB). The payload is a length-prefixed 64-character
-random generation, u64 sequence, u16 count and entries containing u32 account,
-u64 character GUID, u64 login incarnation and length-prefixed UTF-8 character name.
-All integers are big-endian. Success returns the header with operation `0x8002`.
-Each request owns a short TLS connection; presence persists under a 15-second
-lease. It is not tied to the lifetime of that one request socket.
+Configure the world with both exact endpoint identities, for example:
 
-At most 4,096 players per world snapshot, 128 world/realm registrations and 16,384
-players globally are accepted. Duplicate names or GUIDs within a realm, stale
-sequences and competing unexpired generations are rejected atomically. Identical
-GUIDs/names in different realms are independent. A different world cannot replace
-an existing player's live presence until its old owner expires or withdraws it.
-An empty next snapshot withdraws logged-out players; crash or network loss expires
-presence within 15 seconds of the last accepted snapshot. World restart may need
-to wait out that lease. Presence is not character writer fencing or GM authorization.
+```ini
+ChatService.Host = "chat-primary.example.net"
+ChatService.Port = 54940
+ChatService.NodeKey = "skyfire-chat-primary"
+ChatService.Standby.Host = "chat-standby.example.net"
+ChatService.Standby.Port = 54941
+ChatService.Standby.NodeKey = "skyfire-chat-standby"
+```
 
-## Ordinary whisper relay (opt-in)
+An empty standby host disables endpoint failover. World probes validate readiness
+for their own realm, then publish fresh presence before sending work to the selected
+endpoint. A reachable listener alone is not readiness. The backend grants one
+15-second SQL-time lease per realm across the channel and guild domains. Native
+readiness expires conservatively 10 seconds from the start of the last successful
+lease-bearing request. Failed fencing withdraws readiness and old sessions; a new
+owner reloads both domains before serving requests. Healthy lease contention is
+reported as standby; network, certificate and configuration errors remain failures.
 
-Set `ChatService.Whispers = 1` on a world with presence publication enabled and
-matching hub/chat/world builds. The default is zero. This first relay supports two
-players on the **same world node and realm**, matching the current single active
-world per realm. It is not cross-node or cross-realm delivery. Newly logged-in
-players need their next accepted presence snapshot before relayed whispers work.
+Ownership is per realm: two chat nodes may own different realm subsets. Overall
+readiness means at least one owned realm; every probe and operation still checks
+its specific realm. There is no simultaneous ownership of one realm's social data.
+Failover includes lease expiry, reconnect and presence publication, so messages in
+flight can fail instead of being delivered twice. Do not blindly retry chat text or
+administrative mutations.
 
-The normal world handler parses commands, applies flood/mute/language/link checks
-and validates the recipient before queuing. A bounded background worker sends
-operation 3 to chatserver. Chatserver verifies the publishing world's certificate
-scope and current sender/recipient generation, account and login incarnations,
-then returns the unchanged message. Worldserver accepts only an exact reply on
-that authenticated request and rechecks both login incarnations, mute status,
-recipient whisper filter, whitelist, level, faction and GM silence before delivery.
-The existing `Player::Whisper` path runs once, retaining chat hooks, sender informs,
-whitelist updates and AFK/DND replies. Addon whispers and GM command parsing retain
-their existing local paths.
+## Durable command recovery
 
-There are at most 128 queued/in-flight/completed requests per world and four per
-account. A request expires five seconds after admission, including queue, network
-and completion wait. Network work never blocks a world tick. Relay failure reports
-that the message was not sent; it never silently falls back to local delivery or
-retries. Logout/relogin invalidates queued delivery. No chat text is logged or
-persisted. The relay counter means the daemon returned a message, not that the
-recipient actually received it.
+Guild mutations store an immutable outcome in the same transaction as their social
+and legacy projections. The identity includes the authenticated world node, realm,
+world generation, sequence, account, actor and session incarnation. A world that
+loses the reply retains its callback and fences the affected guild's economic
+operations. It queries the original outcome even after the chat process dies or a
+standby takes over. It never replays the mutation to discover its outcome.
 
-Operation 3 uses the 16-byte header followed by a u32 payload length (maximum 512
-bytes). Payload: generation string, u32 sender account, u64 sender GUID and login
-incarnation, u64 recipient GUID and login incarnation, then a length-prefixed UTF-8
-message of 1�255 bytes. The reply is the header with operation `0x8003` followed by
-the identical payload (no length field); the caller already knows its exact size.
-Malformed, stale, unauthorized or unserved requests close without an accepted reply.
+A missing lookup writes a terminal not-executed record under the ownership fence,
+which prevents a delayed original request from committing afterward. A committed
+lookup returns its original revision and projection, including deletion. The world
+will not replace a newer observed projection with that historical response, and
+refreshes current state before releasing the recovery fence. Consumed charter
+protection prevents stale inventory saves from resurrecting a committed charter.
+If the backend cannot establish an outcome, the guild remains fenced until it can.
 
-`chat_whisper_tests` covers malformed text, account spoofing, realm/node isolation,
-lease expiry and sender/recipient relogin. Live acceptance should cover normal
-whispers, AFK/DND, mute/filter/faction restrictions, logout during a request, daemon
-loss and successful recovery after presence is republished. Native tests and live
-acceptance must be run after building; no test servers are modified by this change.
+## Hub operation and validation
 
-## Gameplay routing phases
+Register each daemon as a managed service with `service_kind=5`, a unique service
+key and the matching `cluster_key`, executable, configuration and working directory.
+Reload hub DB records, then use web Start/Stop/Restart or the corresponding console
+commands. Coordinated restart includes managed chat daemons. The service launch
+token and configured certificate identity are checked independently.
 
-Whisper relay is the first delivery slice. These are the full routing requirements:
-
-| Feature | Required routing and authority |
-| --- | --- |
-| Whispers | Realm-qualified sender/recipient, session incarnation, ignore/visibility/faction checks, delivery outcome. |
-| Party and raid | Realm-qualified group ID, membership revision, leader/assistant rules and subgroup scope. |
-| Guild and officer | Realm-qualified guild ID and authoritative membership/rank permissions. Officer chat must not fan out to ordinary members. |
-| Private channels | Realm-qualified channel identity; passwords, owner/moderator roles, bans, invites and moderation parity. |
-| Public channels and addons | Zone/DBC eligibility, faction and language rules, registered addon prefixes and bounded fanout. |
-| GM commands | Actor identity, realm/target, correlation ID, deadline, RBAC recheck by the authoritative executor and redacted audit. |
-
-All presence, group, guild and channel keys must include the realm ID. Equal
-numeric character/guild/group IDs or channel names in different realms must
-never collide. Cross-realm chat is an explicit future policy, not implied by
-hosting two realms in one daemon. Worldserver initially owns membership and
-permission projections; stale projections fail closed. Durable guild/social
-ownership requires typed character-service APIs and scoped writer fencing.
-
-Next is cross-node whisper delivery, followed by group, guild/officer and
-private-channel delivery. Local spatial chat
-and emergency world commands remain available during a chat-service outage.
-
-## Validation
-
-`chat_protocol_tests` covers realm-qualified probes, malformed/truncated metrics,
-duplicate/zero/excessive realm lists, service-role checks and lease ownership.
-`chat_presence_tests` additionally covers cross-realm collisions, replay rejection,
-relogin, conflicting owners, logout snapshots and expiry. After compiling, run
-both with CTest together with `cluster_foundation_tests`.
-Native compilation and live TLS/lifecycle validation remain required before
-deploying this phase. Test at least two realms, disallowed certificates, unknown
-realms, connection exhaustion, hub loss/recovery, managed restart and backup
-admission. In-game whisper relay acceptance remains pending compilation and a two-player test.
-
-## Player routing and administrative admission (September 24)
-
-`ChatService.Messages = 1` opts a world into the new routing path. It requires
-`ChatService.Enable = 1` and includes the existing whisper relay even when the
-older `ChatService.Whispers` option is zero. Standalone defaults remain disabled.
-Rebuild/install **hubserver, worldserver and chatserver together**, then restart
-chat and the worlds. The hub must accept version 4 chat metrics. No SQL migration
-or new database credentials are needed for this routing stage.
-
-The world publishes an authenticated, per-message audience projection. Chatserver
-checks realm, certificate identity, world generation, audience revision, account,
-player incarnation and speaking rights, then selects current listening members.
-The reply contains recipient IDs and session incarnations, not client packets.
-World applies current permissions again and encodes/delivers the existing client
-packet. A lost reply or timeout does not fall back to an uncontrolled local send.
-No request is retried as a new message. A rejected request reports failure.
-
-Covered player-message paths:
-
-- Say, yell and text chat emotes, preserving spatial visibility, phase, shared
-  vision, vehicle/farsight and faction selection in the gameplay authority.
-- Party/subgroup, raid, raid warning and instance/battleground group paths.
-- Guild/officer speech and listening rights, ignores and addon-prefix filtering.
-- Public/private channel messages with current membership, mute and ignore checks.
-- Existing ordinary whispers and addon whisper/group/guild paths. Binary addon
-  text stays byte-exact and has a separate admission budget.
-
-Channel handlers and non-economic guild administration now request chat admission
-before invoking their authoritative world adapter. This includes channel joins,
-passwords, ownership/moderation, mute/kick/ban operations and lists; guild roster,
-invites, membership, ranks, notes, MOTD/info, leadership and news operations.
-In-game GM commands follow the same route and retain the player's identity and
-RBAC checks. Console/hub commands remain on the existing operator control path.
-Sensitive command arguments, passwords and raw client packets stay in a bounded
-world-local pending request; chat receives the operation category/name. Nothing
-executes after the actor's session has changed. A guild membership/invitation
-change requires the operator to retry instead of applying an old request.
-
-Human messages, addon messages and administration have separate pending limits;
-requests expire after five seconds. All network I/O stays on the client worker.
-The world consumes at most 32 fanout/control replies per tick. Spatial recipients
-are collected with the existing grid visitor and rechecked before delivery.
-Server health exposes routed messages, selected recipients and admitted controls.
-These count service decisions, not confirmed client delivery or committed mutations.
-
-### Ownership and remaining extraction
-
-This stage routes same-world audiences within each served realm; it is **not**
-cross-world fanout. Channel ownership/moderation state, guild/social state and
-persistence still reside in worldserver's adapters. Moving that state into the
-daemon requires typed character-service persistence, durable receipts/outbox,
-restart recovery and fenced domain ownership. It must not be implemented by giving
-chatserver unrestricted character-database credentials or by allowing two writers.
-Guild bank, inventory, progression, gameplay effects, scripted NPC dialogue and
-animation emotes remain with their existing authoritative services.
-
-The complete chat-service extraction is therefore not finished by enabling this
-switch. Cross-world delivery, service-owned channel/guild state, friends/ignore
-projections and chat standby remain explicit follow-up gates.
-
-### Build and live acceptance
-
-Native compilation is performed by the operator. Run `chat_protocol_tests`,
-`chat_presence_tests`, `chat_whisper_tests` and `chat_routing_tests` after rebuilding.
-The routing suite exercises realm/session isolation, officer confidentiality,
-revision invalidation, duplicate rejection, deadlines, binary addon text and
-administrative recipient constraints.
-
-With routing enabled, verify counters increase for each message/admin surface,
-then stop chat: new routed operations must fail without local execution. Repeat
-with a rank change, mute, kick, guild leave, logout/relogin and world fallback while
-a reply is pending. Check raid subgroups, officer-only listeners, addon prefixes,
-channel password secrecy and two distinct realms. Test authorized and unauthorized
-GM commands and confirm console/hub maintenance commands remain usable. Finally
-repeat with routing disabled to validate standalone behavior. A successful prior
-local-chat test does not establish this new path's acceptance.
+The health interface reports uptime, configured realms, connections, requests,
+presence and routing counters. Expired metrics are unavailable, not zero. Test
+normal and addon chat, moderation, guild changes and GM authorization after cutover;
+then stop the active chat node while leaving the world running. Verify takeover,
+fresh presence, unchanged guild revision for an uncertain mutation, and recovery
+without replay. Automated fixtures exercise SQL lease fencing, outcome tombstones,
+native mutual TLS routing and lost-reply recovery; retain application logs when
+investigating a client-visible failure.

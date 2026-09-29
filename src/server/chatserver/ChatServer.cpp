@@ -11,6 +11,7 @@
 #include "Cluster/ChatPresence.h"
 #include "Cluster/ChatWhisper.h"
 #include "Cluster/ChatRouting.h"
+#include "Cluster/GuildWire.h"
 #include <boost/asio.hpp>
 #include <boost/asio/ssl.hpp>
 #include <openssl/x509.h>
@@ -37,6 +38,9 @@ namespace Skyfire::Chat
         PresenceDirectory Presence;
         MessageRouter Router;
         SocialPersistence Persistence;
+        std::map<std::uint32_t, std::uint64_t> Ownership;
+        std::uint64_t CurrentEpoch(std::uint32_t realm) const
+        { return Persistence.Enabled() ? Persistence.OwnershipEpoch(realm) : (Persistence.Ready(realm) ? 1 : 0); }
         ServiceHandler Handler;
         std::function<bool(std::uint32_t, ServiceEvent)> Emit;
         std::function<bool(std::uint32_t, std::vector<ServiceEvent>)> EmitBatch;
@@ -135,6 +139,13 @@ namespace Skyfire::Chat
         std::vector<std::uint8_t> Output, Body, Routed;
         std::array<std::uint8_t, 4> Length{};
         std::string Identity;
+        std::uint32_t Realm = 0;
+        std::uint64_t Epoch = 0;
+        bool OwnsRealm() const
+        {
+            auto owned = Owner.Ownership.find(Realm);
+            return Epoch && Owner.CurrentEpoch(Realm) == Epoch && owned != Owner.Ownership.end() && owned->second == Epoch;
+        }
         bool Closed = false, Replied = false;
         Session(State& owner, boost::asio::ip::tcp::socket socket) :
             Owner(owner), Stream(std::move(socket), owner.Tls), Deadline(owner.Io) { }
@@ -172,6 +183,7 @@ namespace Skyfire::Chat
         void Reply()
         {
             if (Closed || Replied) return;
+            if (!OwnsRealm()) { Close(true); return; }
             Replied = true;
             ++Owner.Counters.Requests;
             Output.assign(Input.begin(), Input.end()); Output[6] = 0x80;
@@ -206,11 +218,12 @@ namespace Skyfire::Chat
                     if (presence) probe[7] = 1;
                     if (readError || !DecodeProbe(probe, id, realm) || !self->Owner.Config.Realms.count(realm))
                     { self->Close(true); return; }
-                    if (!presence) { self->Reply(); return; }
-                    if (!self->Owner.Persistence.Ready(realm)) { self->Close(true); return; }
+                    self->Realm = realm; self->Epoch = self->Owner.CurrentEpoch(realm);
+                    if (!self->OwnsRealm()) { self->Close(true); return; }
                     auto scope = self->Owner.Config.WorldRealms.find(self->Identity);
                     if (scope == self->Owner.Config.WorldRealms.end() || !scope->second.count(realm))
                     { self->Close(true); return; }
+                    if (!presence) { self->Reply(); return; }
                     boost::asio::async_read(self->Stream, boost::asio::buffer(self->Length),
                         [self, realm](boost::system::error_code lengthError, std::size_t)
                     {
@@ -225,6 +238,7 @@ namespace Skyfire::Chat
                             [self, realm](boost::system::error_code bodyError, std::size_t)
                         {
                             if (self->Closed) return;
+                            if (!self->OwnsRealm()) { self->Close(true); return; }
                             PresenceSnapshot snapshot;
                             auto now = std::uint64_t(std::chrono::duration_cast<std::chrono::milliseconds>(
                                 std::chrono::steady_clock::now().time_since_epoch()).count());
@@ -236,7 +250,13 @@ namespace Skyfire::Chat
                                     request.Actor, request.Incarnation, now);
                                 bool console = request.Domain == ServiceDomain::Guild && !request.Account && !request.Actor && !request.Incarnation &&
                                     self->Owner.Presence.HasGeneration(realm, self->Identity, request.Generation, now);
-                                if (!console && (!player || player->Account != request.Account)) { self->Close(true); return; }
+                                GuildRequest guild;
+                                bool recovery = request.Domain == ServiceDomain::Guild &&
+                                    DecodeGuildRequest(request.Payload, guild) && guild.Command.Type == GuildState::Action::Status &&
+                                    self->Owner.Presence.HasGeneration(realm, self->Identity, request.Generation, now);
+                                // Recovery proves the original actor tuple durably; it must
+                                // still work after that player logs out of this world generation.
+                                if (!console && !recovery && (!player || player->Account != request.Account)) { self->Close(true); return; }
                                 auto& mailbox = self->Owner.Mailboxes[{realm, self->Identity, request.Generation}];
                                 if (request.Sequence <= mailbox.LastRequest) { self->Close(true); return; }
                                 mailbox.LastRequest = request.Sequence;
@@ -401,6 +421,23 @@ namespace Skyfire::Chat
     }
     void Server::Update()
     {
+        if (_state)
+            for (auto realm : _state->Config.Realms)
+            {
+                auto epoch = _state->CurrentEpoch(realm);
+                auto& previous = _state->Ownership[realm];
+                if (epoch == previous) continue;
+                previous = epoch;
+                _state->Presence.ClearRealm(realm); _state->Router.ClearRealm(realm);
+                for (auto it = _state->RemoteWhispers.begin(); it != _state->RemoteWhispers.end();)
+                    if (it->second.Realm == realm) it = _state->RemoteWhispers.erase(it); else ++it;
+                for (auto it = _state->Mailboxes.begin(); it != _state->Mailboxes.end();)
+                    if (std::get<0>(it->first) == realm)
+                    { _state->EventBytes -= it->second.Bytes; it = _state->Mailboxes.erase(it); }
+                    else ++it;
+                for (auto it = _state->Sessions.begin(); it != _state->Sessions.end();)
+                { auto session = *it++; if (session->Realm == realm) session->Close(); }
+            }
         if (_state) _state->Presence.Expire(std::uint64_t(std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now().time_since_epoch()).count()));
         if (_state)
@@ -427,6 +464,9 @@ namespace Skyfire::Chat
     bool Server::CanEmitServiceEvents(std::uint32_t realm, std::vector<ServiceEvent> const& events) const
     {
         if (!_state || events.size() > 16384) return false;
+        auto owned = _state->Ownership.find(realm);
+        auto epoch = _state->CurrentEpoch(realm);
+        if (!epoch || owned == _state->Ownership.end() || owned->second != epoch) return false;
         auto now = std::uint64_t(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());
         std::map<State::MailKey, std::pair<std::size_t, std::size_t>> needed;
         std::size_t total = 0;

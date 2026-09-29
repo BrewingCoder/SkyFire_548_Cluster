@@ -126,6 +126,11 @@ namespace Skyfire::Chat
         };
         std::map<Owner, Node> _nodes;
     public:
+        void ClearRealm(std::uint32_t realm)
+        {
+            for (auto it = _nodes.begin(); it != _nodes.end();)
+                if (it->first.first == realm) it = _nodes.erase(it); else ++it;
+        }
         static constexpr std::size_t MaxAudiences = 1024, MaxMembers = 4096, MaxQueued = 128;
         static constexpr std::uint64_t DeliveryLifetime = 5000;
 

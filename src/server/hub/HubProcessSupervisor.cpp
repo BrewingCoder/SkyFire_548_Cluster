@@ -264,6 +264,7 @@ bool HubProcessSupervisor::Start(std::string const& serviceKey, std::string& err
 
     runtime.State = HubManagedProcessState::Starting;
     runtime.Ready = false;
+    runtime.ChatStandby = false;
     runtime.CanSendCommands = false;
     runtime.CanManageAccounts = false;
     runtime.CommandPending = false;
@@ -691,17 +692,28 @@ void HubProcessSupervisor::ProcessStatusMessage(std::string const& key, ManagedS
     {
         runtime.RequestedRestart = false;
         runtime.SuppressRestart = false;
-        runtime.State = runtime.Ready ? HubManagedProcessState::Running : HubManagedProcessState::Unresponsive;
+        runtime.State = runtime.Ready ? ((runtime.ChatStandby || runtime.WarmStandby) ? HubManagedProcessState::Standby : HubManagedProcessState::Running) : HubManagedProcessState::Unresponsive;
         runtime.CommandResult = "Stop rejected: connections or requests are still active. Wait for graceful world shutdown.";
         return;
     }
     if (runtime.Definition.ServiceKind && message == "NOT_READY")
     {
+        runtime.ChatStandby = false;
         runtime.Ready = false;
         if (runtime.State != HubManagedProcessState::Stopping) runtime.State = HubManagedProcessState::Unresponsive;
         return;
     }
-    if (runtime.WarmStandby && message == Skyfire::HubControl::StandbyMessage)
+    if (runtime.Definition.ServiceKind == 5 && message == Skyfire::HubControl::StandbyMessage)
+    {
+        // Process health is separate from cluster routing readiness. The chat
+        // daemon keeps its cluster listener unready until it owns durable state.
+        runtime.ChatStandby = true;
+        runtime.Ready = true;
+        runtime.EverReady = true;
+        runtime.LastHeartbeat = now;
+        if (runtime.State != HubManagedProcessState::Stopping) runtime.State = HubManagedProcessState::Standby;
+    }
+    else if (runtime.WarmStandby && message == Skyfire::HubControl::StandbyMessage)
     {
         runtime.Ready = true;
         runtime.LastHeartbeat = now;
@@ -712,12 +724,15 @@ void HubProcessSupervisor::ProcessStatusMessage(std::string const& key, ManagedS
         runtime.OwnershipPath = message.substr(17);
     else if (message == Skyfire::HubControl::StartingMessage)
     {
+        runtime.ChatStandby = false;
+        runtime.Ready = false;
         runtime.State = HubManagedProcessState::Starting;
         runtime.LastHeartbeat = now;
     }
     else if (message == Skyfire::HubControl::ReadyMessage || message == Skyfire::HubControl::WorldReadyMessage || message == Skyfire::HubControl::AccountReadyMessage)
     {
         runtime.CanSendCommands = IsWorldKey(key) && message != Skyfire::HubControl::ReadyMessage;
+        runtime.ChatStandby = false;
         runtime.CanManageAccounts = IsWorldKey(key) && message == Skyfire::HubControl::AccountReadyMessage;
         runtime.Ready = true;
         runtime.EverReady = true;
@@ -729,7 +744,7 @@ void HubProcessSupervisor::ProcessStatusMessage(std::string const& key, ManagedS
     {
         runtime.LastHeartbeat = now;
         if (runtime.Ready && runtime.State != HubManagedProcessState::Stopping)
-            runtime.State = runtime.WarmStandby ? HubManagedProcessState::Standby : HubManagedProcessState::Running;
+            runtime.State = (runtime.WarmStandby || runtime.ChatStandby) ? HubManagedProcessState::Standby : HubManagedProcessState::Running;
     }
     else if (IsWorldKey(key) && message.compare(0, 8, "METRICS ") == 0)
     {
@@ -900,6 +915,7 @@ void HubProcessSupervisor::MarkExited(std::string const& key, ManagedServiceRunt
     runtime.LastExitCode = exitCode;
     runtime.State = HubManagedProcessState::Exited;
     runtime.Ready = false;
+    runtime.ChatStandby = false;
     CloseHandles(runtime);
 }
 

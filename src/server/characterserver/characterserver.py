@@ -17,6 +17,7 @@ import sys
 import time
 import tomllib
 from database import CharacterDatabase
+from social_store import LeaseBusy
 from wire import MAX_FRAME, u32
 from metrics import Metrics
 sys.path.append(str(Path(__file__).resolve().parents[1] / 'shared/Platform'))
@@ -165,6 +166,12 @@ async def serve(config_file, stop=None, database_factory=CharacterDatabase, chan
             pass
         except asyncio.CancelledError:
             raise
+        except LeaseBusy:
+            # Contention is a healthy standby state, not an authentication or
+            # database failure. The peer must retry acquisition after backoff.
+            with contextlib.suppress(Exception):
+                writer.write(u32(1) + b'\2')
+                await asyncio.wait_for(writer.drain(),2)
         except Exception as error:
             # No SQL, credentials, character values or exception messages in this log.
             code = ' code=' + str(error.args[0]) if error.args and type(error.args[0]) is int else ''

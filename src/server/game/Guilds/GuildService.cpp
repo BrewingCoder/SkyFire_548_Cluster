@@ -40,6 +40,7 @@ namespace Skyfire::Chat::GuildService
         std::map<std::uint64_t, Pending> Requests;
         std::map<std::uint64_t, Pending> Uncertain;
         std::map<std::uint32_t, std::uint64_t> Revisions;
+        std::map<std::uint32_t, std::uint64_t> Projected;
         std::set<std::uint32_t> Fenced;
         thread_local bool ApplyingResult = false;
         std::uint64_t Queue(Pending const& pending, std::uint64_t revision)
@@ -67,6 +68,7 @@ namespace Skyfire::Chat::GuildService
     {
         if (!Enabled()) return false;
         if (Fenced.count(guild)) return true;
+        for (auto const& [sequence,pending] : Uncertain) if (pending.Guild == guild) return true;
         for (auto const& [sequence, pending] : Requests) if (pending.Guild == guild && pending.Command.Type != GuildState::Action::Speak && pending.Command.Type != GuildState::Action::OfficerSpeak) return true;
         return false;
     }
@@ -209,6 +211,10 @@ namespace Skyfire::Chat::GuildService
         auto found = Requests.find(result.Request.Sequence);
         if (found == Requests.end()) return;
         auto pending = std::move(found->second); Requests.erase(found);
+        // A queued poll cannot release an uncertain mutation's economy fence.
+        if (pending.Poll)
+            for (auto const& [sequence,uncertain] : Uncertain) if (uncertain.Guild == pending.Guild) return;
+        bool recovered = pending.Recover != 0;
         if (pending.Recover)
         {
             if (!result.Success || result.Response.Status == ServiceStatus::Unknown || result.Response.Status == ServiceStatus::Unavailable) return;
@@ -238,7 +244,7 @@ namespace Skyfire::Chat::GuildService
         {
             Revisions.erase(pending.Guild);
             // A timeout after submission cannot prove that the durable write did
-            // not happen. Keep bank use fenced until a fresh process reload.
+            // not happen. Keep bank use fenced until the durable outcome resolves.
             if (!pending.Fetch && !pending.Poll && (!result.Success || result.Response.Status == ServiceStatus::Unknown))
             { Fenced.insert(pending.Guild); Uncertain.emplace(result.Request.Sequence, pending); }
             if (current && session) session->SendNotification("Guild service could not confirm this change. Retry after guild state is refreshed.");
@@ -246,22 +252,25 @@ namespace Skyfire::Chat::GuildService
             return;
         }
         auto* guild = sGuildMgr->GetGuildById(pending.Guild);
-        if (response.Deleted)
+        bool superseded = Projected[pending.Guild] > response.Revision;
+        if (pending.Poll && superseded) return;
+        if (response.Deleted && !superseded)
         {
+            Projected[pending.Guild] = response.Revision;
             if (guild) { guild->ApplyDisbandProjection(); delete guild; }
             Revisions.erase(pending.Guild); Fenced.erase(pending.Guild);
             if (pending.Admin != GuildAdmin::None && !pending.Poll) SF_LOG_INFO("server.chat", "Guild administration committed deletion for guild %u.", pending.Guild);
             return;
         }
-        if (!guild && pending.Command.Type == GuildState::Action::Create)
+        if (!superseded && !guild && pending.Command.Type == GuildState::Action::Create)
         {
             auto created = std::make_unique<::Guild>();
             if (created->ApplyCreateProjection(response.State))
             { guild = created.release(); sGuildMgr->AddGuild(guild); }
         }
-        if (!guild || response.State.Id != pending.Guild || !guild->ApplyChatProjection(response.State, !pending.Fetch && pending.Command.Type == GuildState::Action::RemoveRank ? uint8(pending.Command.RankId) : 255))
+        if (!superseded && (!guild || response.State.Id != pending.Guild || !guild->ApplyChatProjection(response.State, !pending.Fetch && pending.Command.Type == GuildState::Action::RemoveRank ? uint8(pending.Command.RankId) : 255)))
         { Fenced.insert(pending.Guild); if (current && session) session->SendNotification("Guild projection requires a world restart."); return; }
-        Revisions[pending.Guild] = response.Revision;
+        if (!superseded) { Revisions[pending.Guild] = response.Revision; Projected[pending.Guild] = response.Revision; }
         Fenced.erase(pending.Guild);
         if (pending.Poll) return;
         if (pending.Fetch)
@@ -269,7 +278,7 @@ namespace Skyfire::Chat::GuildService
             if (!current || (pending.Admin == GuildAdmin::None && (player->GetGuildId() != pending.Guild &&
                 !(pending.Command.Type == GuildState::Action::Accept && player->GetGuildIdInvited() == pending.Guild)))) return;
             pending.Fetch = false;
-            auto sequence = Queue(pending, response.Revision);
+            auto sequence = Queue(pending, superseded ? Projected[pending.Guild] : response.Revision);
             if (!sequence) { if (session) session->SendNotification("Guild service unavailable. Change was not sent."); else SF_LOG_ERROR("server.chat", "Guild administration could not be submitted after state refresh."); return; }
             Requests.emplace(sequence, std::move(pending));
         }
@@ -278,10 +287,16 @@ namespace Skyfire::Chat::GuildService
             if (session && current) session->SendNotification("Guild administration committed.");
             SF_LOG_INFO("server.chat", "Guild administration action %u committed for guild %u (account %u).", unsigned(pending.Admin), pending.Guild, pending.Account);
         }
-        else if ((current || pending.Command.Type == GuildState::Action::EditRank) && pending.Applied)
+        else if ((current || pending.Command.Type == GuildState::Action::EditRank) && pending.Applied &&
+            (guild || pending.Command.Type == GuildState::Action::Create) && !(superseded && pending.Command.Type == GuildState::Action::EditRank))
         {
             struct Scope { Scope() { ApplyingResult = true; } ~Scope() { ApplyingResult = false; } } scope;
             pending.Applied(guild, session);
+        }
+        if (recovered)
+        {
+            Revisions.erase(pending.Guild);
+            if (guild) Fenced.insert(pending.Guild);
         }
     }
 }

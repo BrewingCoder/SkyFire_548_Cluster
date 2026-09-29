@@ -14,6 +14,7 @@
 #include <condition_variable>
 #include <chrono>
 #include <deque>
+#include <functional>
 #include <mutex>
 #include <thread>
 
@@ -22,6 +23,7 @@ namespace Skyfire::Chat
     namespace
     {
         using Bytes = std::vector<std::uint8_t>;
+        struct LeaseBusy : std::runtime_error { LeaseBusy() : std::runtime_error("Social realm owned by another daemon") { } };
         struct Rejected : std::runtime_error { Rejected() : std::runtime_error("Social request rejected") { } };
         void U32(Bytes& bytes, std::uint32_t value)
         { for (int shift = 24; shift >= 0; shift -= 8) bytes.push_back(std::uint8_t(value >> shift)); }
@@ -31,6 +33,7 @@ namespace Skyfire::Chat
         struct Endpoint { std::uint32_t Realm; std::string Host, Key; std::uint16_t Port; };
         struct Connection
         {
+            std::function<void(std::chrono::steady_clock::time_point)> Renew;
             boost::asio::io_context Io;
             boost::asio::ssl::context Tls;
             boost::asio::ssl::stream<boost::asio::ip::tcp::socket> Socket;
@@ -66,13 +69,17 @@ namespace Skyfire::Chat
                 if (!size || size > 9 * 1024 * 1024) throw std::runtime_error("Invalid social reply size");
                 Bytes response(size);
                 Wait([&](auto done) { boost::asio::async_read(Socket, boost::asio::buffer(response), done); });
+                if (response.front() == 2) throw LeaseBusy();
                 if (response.front() != 0) throw Rejected();
                 return std::string(response.begin() + 1, response.end());
             }
             boost::json::value Call(std::uint8_t operation, boost::json::object const& body)
             {
                 Bytes payload{operation}; Text(payload, boost::json::serialize(body));
-                return boost::json::parse(Exchange(payload));
+                auto started = std::chrono::steady_clock::now();
+                auto reply = boost::json::parse(Exchange(payload));
+                if (Renew) Renew(started);
+                return reply;
             }
             Connection(Endpoint const& endpoint, Cluster::AgentOptions const& credentials,
                 std::string const& instance, std::string const& domain) : Tls(Context(credentials)), Socket(Io, Tls)
@@ -98,12 +105,15 @@ namespace Skyfire::Chat
             std::string Domain, Request;
             boost::json::object Body;
             std::chrono::steady_clock::time_point Deadline;
+            bool Lookup = false;
         };
         struct Realm
         {
             Endpoint Target;
             std::thread Worker;
-            bool Ready = false;
+            bool Ready = false, Busy = false;
+            std::uint64_t Epoch = 0;
+            std::chrono::steady_clock::time_point ValidUntil{};
             std::map<std::string, SocialSnapshot> Snapshots;
             std::deque<Job> Jobs;
             std::deque<Job> Uncertain;
@@ -130,6 +140,12 @@ namespace Skyfire::Chat
                     {
                         { std::lock_guard<std::mutex> lock(Lock); if (Stopping) return; }
                         auto connection = std::make_unique<Connection>(realm.Target, Credentials, Instance, domain);
+                        connection->Renew = [&](auto started)
+                        {
+                            std::lock_guard<std::mutex> lock(Lock);
+                            if (realm.Ready && started >= realm.ValidUntil) throw std::runtime_error("Social lease budget expired");
+                            realm.ValidUntil = started + std::chrono::seconds(10);
+                        };
                         std::string after;
                         bool first = true;
                         auto& snapshot = restored[domain];
@@ -163,7 +179,7 @@ namespace Skyfire::Chat
                         { std::lock_guard<std::mutex> lock(Lock); Results.push_back(std::move(result)); }
                         realm.Uncertain.pop_front();
                     }
-                    { std::lock_guard<std::mutex> lock(Lock); realm.Snapshots = std::move(restored); realm.Ready = true; }
+                    { std::lock_guard<std::mutex> lock(Lock); realm.Snapshots = std::move(restored); realm.Ready = true; realm.Busy = false; ++realm.Epoch; }
                     SF_LOG_INFO("server.chat", "Social persistence ready for realm %u.", realm.Target.Realm);
                     auto nextPoll = std::chrono::steady_clock::now();
                     for (;;)
@@ -181,15 +197,23 @@ namespace Skyfire::Chat
                             if (std::chrono::steady_clock::now() >= job.Deadline)
                             {
                                 std::lock_guard<std::mutex> lock(Lock);
-                                Results.push_back({realm.Target.Realm, job.Domain, job.Request, Outcome::NotSent});
+                                Result expired{realm.Target.Realm, job.Domain, job.Request, job.Lookup ? Outcome::Unknown : Outcome::NotSent};
+                                expired.Lookup = job.Lookup; Results.push_back(std::move(expired));
                                 continue;
                             }
                             Result result{realm.Target.Realm, job.Domain, job.Request, Outcome::Unknown};
+                            result.Lookup = job.Lookup;
                             try
                             {
-                                auto response = links.at(job.Domain)->Call(18, job.Body);
-                                result.Revision = SocialSnapshot::Number(response.as_object().at("revision"));
-                                result.Status = Outcome::Committed;
+                                auto response = links.at(job.Domain)->Call(job.Lookup ? 21 : 18, job.Body).as_object();
+                                result.Lookup = job.Lookup;
+                                if (job.Lookup && !response.at("found").as_bool()) result.Status = Outcome::NotSent;
+                                else
+                                {
+                                    result.Revision = SocialSnapshot::Number(response.at("revision"));
+                                    result.Status = Outcome::Committed;
+                                    if (job.Lookup) result.Document = response.at("document");
+                                }
                             }
                             catch (Rejected const&)
                             {
@@ -197,7 +221,11 @@ namespace Skyfire::Chat
                                 std::lock_guard<std::mutex> lock(Lock); Results.push_back(std::move(result)); throw;
                             }
                             catch (...)
-                            { realm.Uncertain.push_back(std::move(job)); throw; }
+                            {
+                                if (job.Lookup) { result.Lookup = true; std::lock_guard<std::mutex> lock(Lock); Results.push_back(std::move(result)); }
+                                else realm.Uncertain.push_back(std::move(job));
+                                throw;
+                            }
                             { std::lock_guard<std::mutex> lock(Lock); Results.push_back(std::move(result)); }
                         }
                         if (std::chrono::steady_clock::now() >= nextPoll || hasJob)
@@ -214,14 +242,19 @@ namespace Skyfire::Chat
                         }
                     }
                 }
-                catch (std::exception const&)
+                catch (std::exception const& error)
                 {
                     std::unique_lock<std::mutex> lock(Lock);
+                    realm.Busy = dynamic_cast<LeaseBusy const*>(&error) != nullptr;
                     realm.Ready = false; realm.Snapshots.clear();
-                    for (auto const& job : realm.Jobs) Results.push_back({realm.Target.Realm, job.Domain, job.Request, Outcome::NotSent});
+                    for (auto const& job : realm.Jobs)
+                    {
+                        Result result{realm.Target.Realm, job.Domain, job.Request, job.Lookup ? Outcome::Unknown : Outcome::NotSent};
+                        result.Lookup = job.Lookup; Results.push_back(std::move(result));
+                    }
                     realm.Jobs.clear();
                     if (Stopping) return;
-                    SF_LOG_WARN("server.chat", "Social persistence unavailable for realm %u; rebuilding before accepting mutations.", realm.Target.Realm);
+                    if (!realm.Busy) SF_LOG_WARN("server.chat", "Social persistence unavailable for realm %u; rebuilding before accepting mutations.", realm.Target.Realm);
                     Wake.wait_for(lock, std::chrono::seconds(5), [&] { return Stopping; });
                 }
             }
@@ -256,19 +289,27 @@ namespace Skyfire::Chat
         catch (std::exception const&) { Stop(); error = "Cannot start social persistence; configure a numeric endpoint and certificate identity for every Chat.Realms entry."; return false; }
     }
     bool SocialPersistence::Enabled() const { return bool(_state); }
+    bool SocialPersistence::Standby() const
+    {
+        if (!_state) return false;
+        std::lock_guard<std::mutex> lock(_state->Lock);
+        for (auto const& realm : _state->Realms) if (!realm.second->Busy) return false;
+        return !_state->Realms.empty();
+    }
     bool SocialPersistence::Ready() const
     {
         if (!_state) return true;
         std::lock_guard<std::mutex> lock(_state->Lock);
-        for (auto const& realm : _state->Realms) if (!realm.second->Ready) return false;
-        return true;
+        for (auto const& realm : _state->Realms)
+            if (realm.second->Ready && std::chrono::steady_clock::now() < realm.second->ValidUntil) return true;
+        return false;
     }
     bool SocialPersistence::Read(std::uint32_t realm, std::string const& domain, std::string const& key, SocialRecord& record) const
     {
         if (!_state) return false;
         std::lock_guard<std::mutex> lock(_state->Lock);
         auto found = _state->Realms.find(realm);
-        if (found == _state->Realms.end() || !found->second->Ready || !Domain(domain)) return false;
+        if (found == _state->Realms.end() || !found->second->Ready || std::chrono::steady_clock::now() >= found->second->ValidUntil || !Domain(domain)) return false;
         auto const& records = found->second->Snapshots.at(domain).Records;
         auto item = records.find(key); if (item == records.end()) return false;
         record = item->second; return true;
@@ -278,10 +319,10 @@ namespace Skyfire::Chat
         if (!_state) return true;
         std::lock_guard<std::mutex> lock(_state->Lock);
         auto found = _state->Realms.find(realm);
-        return found != _state->Realms.end() && found->second->Ready;
+        return found != _state->Realms.end() && found->second->Ready && std::chrono::steady_clock::now() < found->second->ValidUntil;
     }
     bool SocialPersistence::Submit(std::uint32_t realm, std::string const& domain, std::string const& request,
-        std::string const& key, std::uint64_t expected, std::uint64_t actor, boost::json::value document, boost::json::value context)
+        std::string const& key, std::uint64_t expected, std::uint64_t actor, boost::json::value document, boost::json::value context, boost::json::value command)
     {
         bool console = false;
         if (domain == "guilds" && context.is_object())
@@ -298,12 +339,31 @@ namespace Skyfire::Chat
             boost::json::serialize(document).size() > 256 * 1024) return false;
         std::lock_guard<std::mutex> lock(_state->Lock);
         auto found = _state->Realms.find(realm);
-        if (_state->Stopping || found == _state->Realms.end() || !found->second->Ready || found->second->Pending >= 32 || _state->Pending >= 128) return false;
+        if (_state->Stopping || found == _state->Realms.end() || (!found->second->Ready || std::chrono::steady_clock::now() >= found->second->ValidUntil) || found->second->Pending >= 32 || _state->Pending >= 128) return false;
         boost::json::object body{{"id", request}, {"key", key}, {"expected", expected}, {"actor", actor}, {"document", std::move(document)}};
         if (!context.is_null()) body["context"] = std::move(context);
+        if (!command.is_null()) body["command"] = std::move(command);
         if (boost::json::serialize(body).size() > 256 * 1024 + 4096) return false;
         found->second->Jobs.push_back({domain, request, std::move(body),
             std::chrono::steady_clock::now() + std::chrono::seconds(10)});
+        ++found->second->Pending; ++_state->Pending; _state->Wake.notify_all(); return true;
+    }
+    std::uint64_t SocialPersistence::OwnershipEpoch(std::uint32_t realm) const
+    {
+        if (!_state) return 0;
+        std::lock_guard<std::mutex> lock(_state->Lock);
+        auto found = _state->Realms.find(realm);
+        return found != _state->Realms.end() && found->second->Ready && std::chrono::steady_clock::now() < found->second->ValidUntil ? found->second->Epoch : 0;
+    }
+    bool SocialPersistence::LookupCommand(std::uint32_t realm, std::string const& request, boost::json::value command)
+    {
+        if (!_state || request.size() != 32 || !command.is_object()) return false;
+        std::lock_guard<std::mutex> lock(_state->Lock);
+        auto found = _state->Realms.find(realm);
+        if (_state->Stopping || found == _state->Realms.end() || (!found->second->Ready || std::chrono::steady_clock::now() >= found->second->ValidUntil) || found->second->Pending >= 32 || _state->Pending >= 128) return false;
+        auto body = std::move(command.as_object());
+        if (boost::json::serialize(body).size() > 2048) return false;
+        found->second->Jobs.push_back({"guilds", request, std::move(body), std::chrono::steady_clock::now() + std::chrono::seconds(10), true});
         ++found->second->Pending; ++_state->Pending; _state->Wake.notify_all(); return true;
     }
     std::vector<SocialPersistence::Result> SocialPersistence::TakeResults()

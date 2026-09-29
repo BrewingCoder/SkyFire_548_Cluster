@@ -22,6 +22,12 @@ namespace Skyfire::Chat
         }
         std::string Text(boost::json::value const& value)
         { auto const& text = value.as_string(); return {text.data(), text.size()}; }
+        boost::json::value CommandIdentity(std::string const& node, ServiceRequest const& request,
+            std::uint32_t guild, std::uint64_t sequence)
+        {
+            return boost::json::object{{"node",node},{"generation",request.Generation},{"sequence",sequence},
+                {"account",request.Account},{"actor",request.Actor},{"incarnation",request.Incarnation},{"guild",guild}};
+        }
         ServiceResponse Reply(std::uint64_t sequence, ServiceStatus status, std::uint64_t revision, boost::json::value const& document)
         {
             GuildResponse reply; reply.Revision = revision; reply.Deleted = document.is_null();
@@ -64,8 +70,26 @@ namespace Skyfire::Chat
         return boost::json::object{{"id", state.Id}, {"name", state.Name}, {"leader", state.Leader},
             {"motd", state.Motd}, {"info", state.Info}, {"ranks", std::move(ranks)}, {"members", std::move(members)}};
     }
+    void GuildAuthority::ObserveOwnership(std::uint32_t realm)
+    {
+        auto epoch = Persistence.OwnershipEpoch(realm);
+        auto previous = Epochs.find(realm);
+        if (previous != Epochs.end() && previous->second == epoch) return;
+        Epochs[realm] = epoch;
+        for (auto it = Outcomes.begin(); it != Outcomes.end();)
+            if (std::get<0>(it->first) == realm) it = Outcomes.erase(it); else ++it;
+        for (auto it = Committed.begin(); it != Committed.end();)
+            if (it->first.first == realm) it = Committed.erase(it); else ++it;
+        for (auto it = Invitations.begin(); it != Invitations.end();)
+            if (it->first.first == realm) it = Invitations.erase(it); else ++it;
+        for (auto it = PendingRequests.begin(); it != PendingRequests.end();)
+            if (it->second.Realm == realm) it = PendingRequests.erase(it); else ++it;
+        for (auto it = Lookups.begin(); it != Lookups.end();)
+            if (it->second.Realm == realm) it = Lookups.erase(it); else ++it;
+    }
     void GuildAuthority::Handle(std::uint32_t realm, std::string const& node, ServiceRequest const& request, ServiceCompletion complete)
     {
+        ObserveOwnership(realm);
         if (!Persistence.Enabled() || !Persistence.Ready(realm))
         {
             Committed.clear();
@@ -78,12 +102,21 @@ namespace Skyfire::Chat
             if (wire.Command.Type == GuildState::Action::Status)
             {
                 auto prior = Outcomes.find({realm, node, request.Generation, wire.Command.Target});
-                if (prior == Outcomes.end()) { complete({request.Sequence, ServiceStatus::Unknown, {}}); return; }
+                if (prior == Outcomes.end())
+                {
+                    if (Lookups.size() >= 128) { complete({request.Sequence, ServiceStatus::Unavailable, {}}); return; }
+                    auto id = Cluster::Handoff::RandomToken().substr(0,32);
+                    if (!Persistence.LookupCommand(realm,id,CommandIdentity(node,request,wire.Guild,wire.Command.Target)))
+                    { complete({request.Sequence,ServiceStatus::Unavailable,{}}); return; }
+                    Lookups.emplace(std::move(id),LookupRequest{realm,request.Sequence,std::move(complete)}); return;
+                }
                 auto const& record = prior->second;
                 if (record.Guild != wire.Guild || record.Account != request.Account || record.Actor != request.Actor || record.Incarnation != request.Incarnation)
                     throw std::runtime_error("Guild receipt identity mismatch");
                 if (!record.Response) { complete({request.Sequence, ServiceStatus::Unknown, {}}); return; }
-                auto response = *record.Response; response.Sequence = request.Sequence; complete(std::move(response)); return;
+                auto response = *record.Response; response.Sequence = request.Sequence;
+                if (response.Status == ServiceStatus::Unavailable) response.Status = ServiceStatus::Rejected;
+                complete(std::move(response)); return;
             }
             bool track = wire.Command.Type != GuildState::Action::Roster && wire.Command.Type != GuildState::Action::Speak && wire.Command.Type != GuildState::Action::OfficerSpeak;
             if (track)
@@ -134,7 +167,7 @@ namespace Skyfire::Chat
                 auto receipt = Cluster::Handoff::RandomToken().substr(0, 32);
                 boost::json::object context{{"petition", wire.Creation.Petition}, {"minimum_signatures", wire.Creation.MinimumSignatures}, {"game_master", wire.Creation.GameMaster}};
                 if (admin) { context["admin_permission"] = wire.Permission; context["console"] = wire.Console; context["founder"] = founder; }
-                if (!Persistence.Submit(realm, "guilds", receipt, key, 0, request.Actor, document, std::move(context)))
+                if (!Persistence.Submit(realm, "guilds", receipt, key, 0, request.Actor, document, std::move(context), CommandIdentity(node,request,guild,request.Sequence)))
                 { complete({request.Sequence, ServiceStatus::Unavailable, {}}); return; }
                 PendingRequests.emplace(receipt, Pending{realm, request.Sequence, request.Actor, std::move(key), std::move(document), std::move(complete)});
                 return;
@@ -260,7 +293,7 @@ namespace Skyfire::Chat
             }
             else if (command.Type == GuildState::Action::RemoveRank) context = boost::json::object{{"rank_removed", command.RankId}};
             else if (command.Type == GuildState::Action::ClaimLeader) context = boost::json::object{{"claim_leader", previousLeader}};
-            if (!Persistence.Submit(realm, "guilds", receipt, key, record.Revision, request.Actor, document, std::move(context)))
+            if (!Persistence.Submit(realm, "guilds", receipt, key, record.Revision, request.Actor, document, std::move(context), CommandIdentity(node,request,guild,request.Sequence)))
             { complete({request.Sequence, ServiceStatus::Unavailable, {}}); return; }
             if (command.Type == GuildState::Action::Accept) Invitations.erase({realm, request.Actor});
             PendingRequests.emplace(receipt, Pending{realm, request.Sequence, request.Actor, std::move(key), std::move(document), std::move(complete)});
@@ -271,6 +304,20 @@ namespace Skyfire::Chat
     void GuildAuthority::Complete(SocialPersistence::Result const& result)
     {
         if (result.Domain != "guilds") return;
+        ObserveOwnership(result.Realm);
+        if (result.Lookup)
+        {
+            auto found = Lookups.find(result.Request);
+            if (found == Lookups.end()) return;
+            auto pending = std::move(found->second); Lookups.erase(found);
+            if (result.Status == SocialPersistence::Outcome::Committed)
+            {
+                try { pending.Completion(Reply(pending.Sequence,ServiceStatus::Ok,result.Revision,result.Document)); }
+                catch (std::exception const&) { pending.Completion({pending.Sequence,ServiceStatus::Unknown,{}}); }
+            }
+            else pending.Completion({pending.Sequence, result.Status == SocialPersistence::Outcome::NotSent ? ServiceStatus::Rejected : ServiceStatus::Unknown,{}});
+            return;
+        }
         auto found = PendingRequests.find(result.Request);
         if (found == PendingRequests.end()) return;
         auto pending = std::move(found->second); PendingRequests.erase(found);
