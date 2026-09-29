@@ -2,7 +2,7 @@
 # See LICENSE.md file for Copyright information
 set(battlegroundserver_sources Main.cpp BattlegroundServer.cpp BattlegroundServer.h)
 if(WIN32)
-  list(APPEND battlegroundserver_sources ${sources_windows_Debugging})
+  list(APPEND battlegroundserver_sources ${sources_windows_Debugging} battlegroundserver.rc battlegroundserver.ico)
 endif()
 add_executable(battlegroundserver ${battlegroundserver_sources})
 # JSON's PMR headers also trigger Container auto-linking on MSVC. The bundled
