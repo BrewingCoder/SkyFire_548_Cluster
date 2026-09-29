@@ -5,6 +5,7 @@
 #ifndef SKYFIRE_CHAT_SERVER_H
 #define SKYFIRE_CHAT_SERVER_H
 #include "Cluster/ClusterAgent.h"
+#include "Cluster/ChatService.h"
 #include <memory>
 #include <set>
 #include <map>
@@ -21,6 +22,7 @@ namespace Skyfire::Chat
         std::set<std::uint32_t> Realms;
         std::map<std::string, std::set<std::uint32_t>> WorldRealms;
     };
+    class SocialPersistence;
     class Server
     {
     public:
@@ -28,6 +30,12 @@ namespace Skyfire::Chat
         ~Server();
         bool Open(Options options, Cluster::AgentOptions const& tls, std::string& error);
         void Update();
+        void SetServiceHandler(ServiceHandler handler);
+        bool EmitServiceEvent(std::uint32_t realm, ServiceEvent event);
+        bool CanEmitServiceEvents(std::uint32_t realm, std::vector<ServiceEvent> const& events) const;
+        bool EmitServiceEvents(std::uint32_t realm, std::vector<ServiceEvent> events);
+        PresenceDirectory& GetPresence();
+        SocialPersistence& GetPersistence();
         void Stop();
         bool Ready() const;
         Cluster::ChatMetrics Metrics() const;

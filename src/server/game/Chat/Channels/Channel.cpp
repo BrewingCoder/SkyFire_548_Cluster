@@ -49,7 +49,7 @@ Channel::Channel(std::string const& name, uint32 channelId, uint32 team) :
         _flags |= CHANNEL_FLAG_CUSTOM;
 
         // If storing custom channels in the db is enabled either load or save the channel
-        if (sWorld->GetBoolConfig(WorldBoolConfigs::CONFIG_PRESERVE_CUSTOM_CHANNELS))
+        if (!ServiceEnabled() && sWorld->GetBoolConfig(WorldBoolConfigs::CONFIG_PRESERVE_CUSTOM_CHANNELS))
         {
             PreparedStatement* stmt = CharacterDatabase.GetPreparedStatement(CHAR_SEL_CHANNEL);
             stmt->setString(0, name);
@@ -94,6 +94,7 @@ Channel::Channel(std::string const& name, uint32 channelId, uint32 team) :
 
 void Channel::UpdateChannelInDB() const
 {
+    if (ServiceEnabled()) return;
     if (_IsSaved)
     {
         std::ostringstream banlist;
@@ -118,6 +119,7 @@ void Channel::UpdateChannelInDB() const
 
 void Channel::UpdateChannelUseageInDB() const
 {
+    if (ServiceEnabled()) return;
     PreparedStatement* stmt = CharacterDatabase.GetPreparedStatement(CHAR_UPD_CHANNEL_USAGE);
     stmt->setString(0, _name);
     stmt->setUInt32(1, _Team);
@@ -126,6 +128,7 @@ void Channel::UpdateChannelUseageInDB() const
 
 void Channel::CleanOldChannelsInDB()
 {
+    if (ServiceEnabled()) return;
     if (sWorld->getIntConfig(WorldIntConfigs::CONFIG_PRESERVE_CUSTOM_CHANNEL_DURATION) > 0)
     {
         PreparedStatement* stmt = CharacterDatabase.GetPreparedStatement(CHAR_DEL_OLD_CHANNELS);
@@ -138,6 +141,9 @@ void Channel::CleanOldChannelsInDB()
 
 void Channel::JoinChannel(Player* player, std::string const& pass)
 {
+    if (ServiceEnabled() && HasFlag(CHANNEL_FLAG_LFG) && sWorld->GetBoolConfig(WorldBoolConfigs::CONFIG_RESTRICTED_LFG_CHANNEL) && AccountMgr::IsPlayerAccount(player->GetSession()->GetSecurity()) && player->GetGroup())
+    { WorldPacket data; MakeNotInLfg(&data); SendToOne(&data, player->GetGUID()); return; }
+    if (ServiceCommand(player, Skyfire::Chat::ChannelAction::Join, {}, pass)) return;
     uint64 guid = player->GetGUID();
     if (IsOn(guid))
     {
@@ -216,6 +222,7 @@ void Channel::JoinChannel(Player* player, std::string const& pass)
 
 void Channel::LeaveChannel(Player* player, bool send)
 {
+    if (ServiceCommand(player, Skyfire::Chat::ChannelAction::Leave, {}, {}, {}, 0, false, !send)) { if (!send) { playersStore.erase(player->GetGUID()); player->LeftChannel(this); } return; }
     uint64 guid = player->GetGUID();
     if (!IsOn(guid))
     {
@@ -267,6 +274,7 @@ void Channel::LeaveChannel(Player* player, bool send)
 
 void Channel::KickOrBan(Player const* player, std::string const& badname, bool ban)
 {
+    if (ServiceCommand(player, ban ? Skyfire::Chat::ChannelAction::Ban : Skyfire::Chat::ChannelAction::Kick, badname)) return;
     uint64 good = player->GetGUID();
 
     if (!IsOn(good))
@@ -337,6 +345,7 @@ void Channel::KickOrBan(Player const* player, std::string const& badname, bool b
 
 void Channel::UnBan(Player const* player, std::string const& badname)
 {
+    if (ServiceCommand(player, Skyfire::Chat::ChannelAction::Unban, badname)) return;
     uint64 good = player->GetGUID();
 
     if (!IsOn(good))
@@ -377,6 +386,7 @@ void Channel::UnBan(Player const* player, std::string const& badname)
 
 void Channel::Password(Player const* player, std::string const& pass)
 {
+    if (ServiceCommand(player, Skyfire::Chat::ChannelAction::Password, {}, pass)) return;
     uint64 guid = player->GetGUID();
 
     ChatHandler chat(player->GetSession());
@@ -407,6 +417,7 @@ void Channel::Password(Player const* player, std::string const& pass)
 
 void Channel::SetMode(Player const* player, std::string const& p2n, bool mod, bool set)
 {
+    if (ServiceCommand(player, mod ? Skyfire::Chat::ChannelAction::Moderator : Skyfire::Chat::ChannelAction::Mute, p2n, {}, {}, 0, set)) return;
     uint64 guid = player->GetGUID();
 
     if (!IsOn(guid))
@@ -458,6 +469,7 @@ void Channel::SetMode(Player const* player, std::string const& p2n, bool mod, bo
 
 void Channel::SetOwner(Player const* player, std::string const& newname)
 {
+    if (ServiceCommand(player, Skyfire::Chat::ChannelAction::Owner, newname)) return;
     uint64 guid = player->GetGUID();
 
     if (!IsOn(guid))
@@ -496,6 +508,7 @@ void Channel::SetOwner(Player const* player, std::string const& newname)
 
 void Channel::SendWhoOwner(uint64 guid)
 {
+    if (ServiceCommand(ObjectAccessor::FindPlayer(guid), Skyfire::Chat::ChannelAction::QueryOwner)) return;
     WorldPacket data;
     if (IsOn(guid))
         MakeChannelOwner(&data);
@@ -506,6 +519,7 @@ void Channel::SendWhoOwner(uint64 guid)
 
 void Channel::List(Player const* player)
 {
+    if (ServiceCommand(player, Skyfire::Chat::ChannelAction::List)) return;
     uint64 guid = player->GetGUID();
 
     if (!IsOn(guid))
@@ -554,6 +568,7 @@ void Channel::List(Player const* player)
 
 void Channel::Announce(Player const* player)
 {
+    if (ServiceCommand(player, Skyfire::Chat::ChannelAction::Announce)) return;
     uint64 guid = player->GetGUID();
 
     if (!IsOn(guid))
@@ -586,6 +601,7 @@ void Channel::Announce(Player const* player)
 
 void Channel::Say(uint64 guid, std::string const& what, Language lang)
 {
+    if (ServiceCommand(ObjectAccessor::FindPlayer(guid), Skyfire::Chat::ChannelAction::Speak, {}, {}, what, uint32(lang))) return;
     if (what.empty())
         return;
 
@@ -642,6 +658,7 @@ void Channel::Say(uint64 guid, std::string const& what, Language lang)
 
 void Channel::Invite(Player const* player, std::string const& newname)
 {
+    if (ServiceCommand(player, Skyfire::Chat::ChannelAction::Invite, newname)) return;
     uint64 guid = player->GetGUID();
 
     if (!IsOn(guid))

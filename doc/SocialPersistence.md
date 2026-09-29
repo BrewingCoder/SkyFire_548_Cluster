@@ -1,191 +1,155 @@
-# Character-service social persistence contract
+# Clustered chat and social ownership
 
-This is an opt-in persistence foundation for the native chat daemon. It does not
-yet migrate channel or guild administration from worldserver. Leave
-`allowed_chat_nodes = []` until the native owner, legacy writer cutover and client
-parity checks are implemented. Existing world character RPC remains version 2.
+The native chat daemon routes realm-scoped player messages and owns channel state
+and guild social administration when the authority flags are enabled. Worldserver
+retains client packet encoding, player visibility, spatial/group gameplay checks,
+script callbacks, RBAC and guild-bank gameplay. Character service owns durable
+social records and updates the legacy guild read/economy projection atomically.
 
-## Installation and authority
+## Offline cutover
 
-The pending character migration `001_social_domain_store.sql` creates five new
-tables. It does not alter legacy guild/channel rows. Apply it through the character
-schema update workflow before enabling chat identities. The daemon checks for the
-tables at startup when the allowlist is nonempty. No CI changes are included.
+Use matching worldserver, chatserver and character-service versions on every node.
+Keep all worlds and social daemons for the realm stopped throughout the import.
+Back up the character database and configurations first.
 
-Chat identities must be separate from `allowed_world_nodes`. Mutual TLS, certificate
-revocation checks and a live hub lease are required for both roles. A chat identity
-cannot call world SQL operations; world raw SQL cannot access the social tables.
-The configured character service realm is the only realm that connection can use.
-A multi-realm chat daemon needs one authorized persistence endpoint per realm.
+1. Apply the character social migrations through the existing database update
+   workflow: `001_social_domain_store.sql`, `002_social_guild_membership.sql` and
+   `003_social_consumed_items.sql` (or their promoted release names).
+2. Run `python -B import_social.py --config characterserver.toml --offline` from
+   the character-service directory. The default is a dry run and rolls back.
+3. Resolve any reported invalid legacy rows. Repeat with `--apply` to import both
+   domains together. The importer requires InnoDB, the database ownership lock
+   and an empty destination; it does not overwrite an existing social snapshot.
+4. Add the chat certificate node key to character `allowed_chat_nodes` and set
+   `social_guild_projection = true`. Chat and world certificate identities must
+   be distinct. Enable `Chat.Persistence.Enable` and configure the numeric TLS
+   character endpoint and certificate identity for every `Chat.Realms` entry.
+5. Enable `ChatService.Enable`, `ChatService.Messages`,
+   `Chat.ChannelAuthority.Enable` and `Chat.GuildAuthority.Enable` in every world
+   configuration for the realm. `CharacterService.Enable` is also required.
+6. Start character service, then chatserver. Wait for persistence readiness before
+   starting the active world and its standby. Do not resume legacy writers after
+   importing: they would make the staged snapshot stale.
 
-The character service retains the database advisory lock. Social ownership is
-separate for `(realm, channels)` and `(realm, guilds)` and does not take ownership
-of player saves. An owner is identified by certificate node, process incarnation
-and durable epoch. A replacement can attach only after the old domain sessions
-have detached. Replacement retires the old incarnation permanently; old requests
-cannot acquire ownership again or mutate the new owner's state.
+Authority flags are fixed for a world process lifetime. Changing ownership requires
+a restart; a live configuration reload cannot switch back to legacy writers.
 
-## Wire format
+New installation defaults remain disabled so an existing deployment cannot
+silently switch database ownership during an upgrade. No CI promotion changes are
+part of this implementation. Setup notes and the shipped migration contract live
+here; machine-specific credentials and working notes must not be committed.
 
-Use the existing character service TLS endpoint and framing: network-order u32
-payload size followed by the payload. Replies are framed the same way and begin
-with status byte 0 for success or 1 for rejection. A rejection closes the session.
-Strings use u32 byte length plus UTF-8 bytes. There is no SQL field in this API.
+## Authority and boundaries
 
-- Handshake: byte 16, byte 1 (social protocol version), u32 realm, string process
-  incarnation (32 lowercase hexadecimal characters), string domain (`channels`
-  or `guilds`). Success has no body. Epoch and domain bind to the connection.
-- Operation 17: byte 17 and length-prefixed JSON `{ "after": "", "limit": 32 }`.
-  Pages records by their binary UTF-8 key. Result has `head` and `records`; each
-  record contains `key`, `revision`, and `document`. Tombstones have null documents.
-- Operation 18: byte 18 and length-prefixed JSON with exactly `id`, `key`,
-  `expected`, `actor`, and `document`. `id` is a 32-character lowercase hexadecimal
-  request ID, `expected` is the last record revision (0 for a new key), and actor
-  is the character GUID attested by the trusted chat authority. The result contains
-  the committed `revision`.
-- Operation 19: byte 19 and length-prefixed JSON `{ "after": 0, "limit": 32 }`.
-  Returns `head` and ordered `events`, containing revision, key, document and actor.
+Every world request is bound to its TLS certificate, configured realm, process
+presence generation, account and player-session incarnation. Administrative
+console requests use an explicit system identity from an authorized world;
+player GM commands carry the action-specific RBAC check. These trusted-service
+APIs must not be exposed directly to game clients.
 
-JSON keys must be unique. Integers cannot be booleans. Unknown fields, unsupported
-operations, oversized documents and invalid UTF-8 are rejected. A document is at
-most 256 KiB; keys are at most 192 bytes; pages contain at most 32 records/events.
-Frames remain bounded by the existing transport limit.
+Channel authority covers custom and built-in membership, ownership, moderation,
+mute, bans, passwords, invitations, announcements, lists and messages. Passwords
+are stored as salted PBKDF2-SHA256 verifiers; password work is bounded and runs off
+the daemon event loop. Runtime membership and moderator flags are durable and
+bound to world/session generations. Remote invitation recipients attest their
+current visibility and faction permissions before an invitation is completed.
 
-## Stored documents
+Guild authority covers membership/invitations, ranks, leader changes, notes,
+MOTD/info, creation/disbanding, GM administrative operations and guild/officer
+messages. Creation validates and consumes a petition and charter in the same
+transaction as the new guild. Character deletion and faction changes update the
+social membership and leader succession inside their character transaction.
+Rank changes preserve the matching bank limits and rights. Rank permission edits
+commit their social and bank limits together. Disbanding removes
+bank item data atomically; world projections apply the corresponding in-memory
+cleanup only after confirmation.
 
-Channel documents contain exactly `name`, `team`, `channel_id`, `announce`,
-`ownership`, `password_verifier`, and `bans`. Plaintext passwords are rejected;
-nonempty verifiers use `pbkdf2-sha256$iterations$salt$digest`, with a 16-byte hex salt
-and 32-byte hex digest. The future channel owner must choose and enforce its
-password policy. Presence, online channel members and moderator session state
-must be reconstructed by the native owner; this API does not infer them.
+Guild-bank transactions, achievements/progression, recruitment finder gameplay,
+calendar gameplay and inventory simulation remain with world/character services.
+Chat does not become a generic SQL or raw client-opcode tunnel. Gameplay GM
+commands still execute on the authoritative world as the original actor.
 
-Guild documents contain exactly `id`, `name`, `leader`, `motd`, `info`, `ranks`,
-and `members`. Ranks contain `name` and `rights`; members contain `guid`, `rank`,
-`public_note`, and `officer_note`. The leader must be a member, ranks must exist,
-and member GUIDs must be unique. Bank, currency, inventory, progression and game
-effects are deliberately outside this schema. This is not yet the complete guild
-administration contract: pending invitations and their notifications need their
-own typed state during the native-owner implementation.
+Remote whispers use recipient-world permission checks and a delivery
+acknowledgment. Group messages use the gameplay world's roster and require a
+matching gameplay group on the receiving world. Chat routing does not replicate
+or create gameplay groups. Cross-world script callbacks cannot receive a remote
+`Player*`; they use the sender-only chat hook.
 
-The API validates persistence shape and ownership, not player permissions. The
-authenticated chat owner must validate actor membership, current permissions,
-realm scope and command intent before submitting a state change. Do not expose
-this trusted-service API directly to clients or allow arbitrary web submissions.
+## Persistence and recovery
 
-## Commit, recovery and reconstruction
+The character service retains its database advisory lock. Separate channel and
+guild ownership epochs identify the chat certificate node and process incarnation.
+A replacement takes ownership only after prior sessions detach; retired
+incarnations cannot acquire it again.
 
-Each mutation atomically commits its record, receipt, ordered outbox event and
-domain revision. Retrying the same request ID and content under the same owner
-returns the original revision. Reusing an ID with different content is rejected.
-Deletion writes a versioned tombstone rather than resetting the record to revision
-zero. Lost acknowledgements must not be retried under a new request ID.
+A mutation commits its record, CAS revision, idempotency receipt, ordered outbox
+and relevant guild projection/index in one transaction. A unique realm/GUID index
+prevents membership in two guilds. Consumed-charter records prevent a delayed save
+from resurrecting an item during the same world incarnation. Economic fields are
+never accepted as arbitrary social-document fields.
 
-On startup, the native owner must reconstruct records and replay outbox events
-before serving mutations. Record revisions make replay idempotent; a paginated
-snapshot is not one global transaction, so record the first head and replay events
-after it, applying only revisions newer than each reconstructed record. A successor
-must reconstruct committed state before issuing any new mutation. Historical
-receipts are not permission for a retired incarnation to reconnect.
+Unknown commit outcomes are not replayed as new commands or executed locally.
+The daemon reconnects exclusively and checks the original durable receipt after
+a lost database reply. World guild projections refresh through bounded read-only
+requests and retain callbacks while querying an uncertain command's status.
+Bank changes are blocked while a social change is pending or its result is
+uncertain. If the chat daemon itself restarts and loses its bounded command-status
+cache, an unresolved world command stays fenced; restart the world to reload its
+committed projection rather than guessing whether a rank removal or creation ran.
 
-Database recovery waits for both world and social sessions to drain before opening
-a new ownership connection. The service does not automatically replay writes.
-Outbox and receipt pruning is not enabled; introduce an acknowledged consumer
-watermark and a documented retry window before adding retention.
+Queued legacy bank writes lock and validate their guild/rank/member references,
+so a late transaction cannot recreate a disbanded guild's rows. These economic
+requests still rely on world authorization; their legacy SQL envelope does not
+carry a social revision or full actor permission proof.
 
-## Native connection and recovery
+The event transport is bounded, uses acknowledged cursors and resets cursors on
+mailbox epoch changes after daemon restart. Transient chat messages expire instead
+of being delivered late. A timeout can mean delivery was not confirmed; callers
+must not blindly retry a possibly delivered message.
 
-The native chat daemon now contains a background persistence worker for each
-configured realm. `Chat.Persistence.Enable = 0` preserves the current behavior.
-When enabled, configure `Chat.Persistence.Realm.<id>.Host`, `.Port` and `.NodeKey`
-for every `Chat.Realms` entry. Host is a numeric IP with a matching certificate
-SAN; NodeKey must match the character service certificate identity. Client
-credentials are the chat daemon's cluster certificate and key. No MySQL
-credentials are added to chatserver.
+## Character-service wire contract
 
-Each worker attaches separately to channels and guilds, reads paginated snapshots,
-and replays events from the initial head before marking its realm ready. Missing
-events, regressing revisions and malformed records fail recovery. Each domain
-cache is bounded to 8192 records and 4 MiB of serialized keys/documents. A ready
-realm can continue handling requests while another realm recovers; the overall
-hub readiness flag is false until all configured realms are ready.
+The existing TLS framing is u32 payload size, followed by the payload. Replies
+start with status byte 0 (success) or 1 (rejection). Strings use u32 byte lengths.
+World character RPC remains version 2. Social operations are:
 
-The internal mutation API admits at most 32 outstanding requests per realm and
-128 overall, including unconsumed results. Queued work expires before transmission
-after ten seconds. Each network phase has a five-second deadline; SQL/TLS work
-never runs on the chat event loop. Results distinguish committed, rejected,
-unknown and not-sent outcomes. Connections and snapshots rebuild after failure;
-unknown writes are not automatically resubmitted. Readiness and cache access are
-synchronized with the worker; a stale revision still fails at the database.
+- Handshake 16: version 1, realm, 32-hex process incarnation, domain.
+- Snapshot 17: JSON `after` key and page `limit` (maximum 32).
+- Mutation 18: JSON `id`, `key`, `expected`, `actor`, `document`, and optional
+  typed guild `context` for lifecycle/administrative proofs. Response is the
+  committed revision. Actor zero is reserved for attested console operations.
+- Outbox 19: JSON `after` revision and bounded `limit`.
+- Receipt 20: JSON `id`; returns `found` and, when present, the committed revision.
+  Lookup is fenced to the same process incarnation. Exclusive social connections
+  require an old session to finish and detach before reconnecting, so recovery
+  cannot race a still-running mutation from that session.
 
-Boost.JSON is compiled from the existing Boost headers in the native target; no
-additional JSON binary package is required. Build chatserver and the
-`social_snapshot_tests` target to validate the native implementation. The native
-test covers paginated reconstruction, stale-event suppression, tombstones, gaps,
-regressing heads, invalid revisions and cache bounds. Native compilation remains
-pending; Python database/TLS tests do not substitute for this check.
+Duplicate JSON keys, unsupported fields, invalid UTF-8, out-of-range integers and
+oversized documents are rejected. Documents are limited to 256 KiB; the native
+cache is bounded to 8,192 records/4 MiB per realm/domain.
 
-## Validation and remaining cutover
+Channel documents contain name, team, channel ID, announcement/ownership flags,
+password verifier and bans. Optional runtime data stores owner and member
+identity/incarnation/role information. Legacy records without runtime data remain
+readable. Channel keys use SHA256 of decimal team, a colon, and the name folded
+with the existing `wcharToLower` rules; Unicode casefold would incorrectly merge
+some legacy names.
 
-The disposable MySQL/TLS tests cover separate role admission, world SQL rejection,
-realm mismatch, CAS conflicts, tombstones, takeover fencing, continued world reads,
-lost commit acknowledgement, and rollback when receipt insertion fails. Run
-`src/tests/character_service_test.py --database-config <private fixture config>`.
+Guild documents contain ID, name, leader, MOTD/info, rank names/rights and member
+ranks/notes. The leader is the sole rank-zero member. Text respects the legacy
+utf8mb3 column and client packet limits. Guild keys are `guild-<id>`; realm is the
+outer database partition.
 
-Channel/guild command integration, invitations, legacy data import, disabling every old
-writer, notification parity and cross-world fan-out remain required before this
-can replace the working routing/admission path. Do not enable it as a substitute
-for those changes.
+## Verification
 
-## Offline legacy import (staging only)
+Native CTest targets cover channel/guild policy, protocol envelopes, presence,
+routing, whispers and snapshot recovery. `character_service_test.py` accepts
+`--database-config` and uses disposable databases. It exercises receipt rollback,
+guild uniqueness, writer fencing, charter creation, rank bank-right migration,
+character deletion and disband cleanup against the shipped schema.
 
-CMake INSTALL includes `characterserver/import_social.py`. It imports custom
-channel settings, password verifiers and bans, plus guild identities, ranks,
-rosters, public/officer notes, MOTD and information. Bank balances, bank permissions,
-inventory and progression stay in the legacy tables. Original rows are never
-modified or deleted. Passwords are converted to independently salted PBKDF2-SHA256
-verifiers; output contains only aggregate counts.
-
-Stop all worlds, chat and character services using the database. From the installed
-character-service directory, first validate with:
-
-```
-python -B import_social.py --config characterserver.toml --offline
-```
-
-The default rolls back without writing destination state. Add `--apply` to commit
-both domains atomically. The importer takes the same database ownership lock as
-characterserver, requires InnoDB and an empty social destination for the configured
-realm, and uses a serializable transaction. An error in either domain rolls back
-both. Existing ownership, receipts, retired incarnations or records prevent a
-second import; it never silently replaces a newer snapshot. A lost commit reply
-requires inspecting the destination before doing anything else.
-
-Import rejects invalid GUIDs, orphaned guild rows, discontinuous ranks, invalid
-leadership, normalized-name collisions, oversized documents and data exceeding
-the native cache bounds. Repair legacy data explicitly before retrying. Channel
-keys are `channel-` plus SHA256 of decimal team, a colon, and NFC/casefolded UTF-8
-name; guild keys are `guild-<id>`. Realm remains the outer SQL partition. Import
-revisions are contiguous per domain, with matching outbox records and a fenced
-`legacy-import` owner that the first authenticated chat owner supersedes.
-
-This is staging, not writer cutover. Do not run it on the live test bed yet or
-enable chat persistence as a result of staging. Continued legacy writes would make
-staged data stale. The eventual cutover must import under the same offline window
-that disables the old writers and activates the new handler adapters.
-
-## Native channel policy model
-
-`chatserver/ChannelState.h` now isolates join/leave, owner handoff, moderation,
-mute, kick/ban/unban, announcements, password-setting validation, invite, list and
-speaking policy from world objects. `channel_state_tests` exercises session fencing,
-permission denial, owner protection, self-kick, candidate-state isolation,
-password/ban checks, faction checks and member limits. Native compilation/testing
-is still operator-owned.
-
-The model is not called by the live protocol yet. It operates on a candidate copy;
-an adapter must commit durable settings through SocialPersistence before publishing
-that copy or notifications. It must authenticate realm and player incarnation,
-resolve targets, verify passwords in a bounded crypto worker, and retain current
-RBAC, visibility, ignore, zone eligibility and notification rules. Channel handler
-cutover, guild policy/handler extraction and cross-world delivery remain unfinished.
+`chat_service_test.py --chatserver <native-executable> --database-config <fixture-config>`
+starts a private mTLS hub fixture, the real native chat daemon and a character
+service with a disposable schema. It tests cross-world routing, authorization,
+durable channel/guild changes and daemon-restart recovery. It does not drive an
+interactive game client or reuse player credentials.

@@ -9,6 +9,7 @@
 #include "GossipDef.h"
 #include "Guild.h"
 #include "GuildMgr.h"
+#include "GuildService.h"
 #include "Language.h"
 #include "Log.h"
 #include "ObjectAccessor.h"
@@ -556,6 +557,28 @@ void WorldSession::HandleTurnInPetitionOpcode(WorldPacket& recvData)
     }
 
     // Proceed with guild/arena team creation
+
+    if (Skyfire::Chat::GuildService::Enabled())
+    {
+        std::vector<uint64> members{_player->GetGUID()};
+        if (result)
+            do { members.push_back(MAKE_NEW_GUID(result->Fetch()[0].GetUInt32(), 0, HIGHGUID_PLAYER)); }
+            while (result->NextRow());
+        // Ensure a newly purchased charter is durable before asking the service
+        // to atomically consume it and create the guild. A missing/uncommitted
+        // item is rejected by the service without consuming anything.
+        _player->SaveToDB();
+        Skyfire::Chat::GuildService::Create(this, sGuildMgr->GenerateGuildId(), name, GUID_LOPART(petitionGuid),
+            requiredSignatures, false, std::move(members), [petition = uint64(petitionGuid), name](Guild*, WorldSession* session)
+            {
+                if (auto* charter = session->GetPlayer()->GetItemByGuid(petition))
+                    session->GetPlayer()->DestroyItem(charter->GetBagSlot(), charter->GetSlot(), true);
+                Guild::SendCommandResult(session, GUILD_COMMAND_CREATE, ERR_GUILD_COMMAND_SUCCESS, name);
+                WorldPacket reply(SMSG_TURN_IN_PETITION_RESULTS, 1);
+                reply.WriteBits(PETITION_TURN_OK, 4); reply.FlushBits(); session->SendPacket(&reply);
+            });
+        return;
+    }
 
     // Delete charter item
     _player->DestroyItem(item->GetBagSlot(), item->GetSlot(), true);

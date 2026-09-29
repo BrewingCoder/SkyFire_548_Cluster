@@ -106,6 +106,7 @@ namespace Skyfire::Chat
             bool Ready = false;
             std::map<std::string, SocialSnapshot> Snapshots;
             std::deque<Job> Jobs;
+            std::deque<Job> Uncertain;
             unsigned Pending = 0;
         };
         mutable std::mutex Lock;
@@ -150,6 +151,18 @@ namespace Skyfire::Chat
                         }
                         links.emplace(domain, std::move(connection));
                     }
+                    // A successful reattach fences the former connection. Query its
+                    // receipt after that fence; never replay an uncertain mutation.
+                    while (!realm.Uncertain.empty())
+                    {
+                        auto const& job = realm.Uncertain.front();
+                        auto receipt = links.at(job.Domain)->Call(20, {{"id", job.Request}}).as_object();
+                        bool found = receipt.at("found").as_bool();
+                        Result result{realm.Target.Realm, job.Domain, job.Request, found ? Outcome::Committed : Outcome::NotSent};
+                        if (found) result.Revision = SocialSnapshot::Number(receipt.at("revision"));
+                        { std::lock_guard<std::mutex> lock(Lock); Results.push_back(std::move(result)); }
+                        realm.Uncertain.pop_front();
+                    }
                     { std::lock_guard<std::mutex> lock(Lock); realm.Snapshots = std::move(restored); realm.Ready = true; }
                     SF_LOG_INFO("server.chat", "Social persistence ready for realm %u.", realm.Target.Realm);
                     auto nextPoll = std::chrono::steady_clock::now();
@@ -184,7 +197,7 @@ namespace Skyfire::Chat
                                 std::lock_guard<std::mutex> lock(Lock); Results.push_back(std::move(result)); throw;
                             }
                             catch (...)
-                            { std::lock_guard<std::mutex> lock(Lock); Results.push_back(std::move(result)); throw; }
+                            { realm.Uncertain.push_back(std::move(job)); throw; }
                             { std::lock_guard<std::mutex> lock(Lock); Results.push_back(std::move(result)); }
                         }
                         if (std::chrono::steady_clock::now() >= nextPoll || hasJob)
@@ -268,15 +281,28 @@ namespace Skyfire::Chat
         return found != _state->Realms.end() && found->second->Ready;
     }
     bool SocialPersistence::Submit(std::uint32_t realm, std::string const& domain, std::string const& request,
-        std::string const& key, std::uint64_t expected, std::uint64_t actor, boost::json::value document)
+        std::string const& key, std::uint64_t expected, std::uint64_t actor, boost::json::value document, boost::json::value context)
     {
+        bool console = false;
+        if (domain == "guilds" && context.is_object())
+        {
+            auto const& object = context.as_object(); auto flag = object.if_contains("console"), permission = object.if_contains("admin_permission");
+            if (flag && flag->is_bool() && flag->as_bool() && permission)
+            {
+                auto value = permission->is_uint64() ? permission->as_uint64() : permission->is_int64() && permission->as_int64() >= 0 ? std::uint64_t(permission->as_int64()) : 0;
+                console = value >= 402 && value <= 407;
+            }
+        }
         if (!_state || !Domain(domain) || request.size() != 32 || request.find_first_not_of("0123456789abcdef") != std::string::npos ||
-            key.empty() || key.size() > 192 || !Cluster::ValidUtf8(key) || !actor || expected > 0x7fffffffffffffffULL ||
+            key.empty() || key.size() > 192 || !Cluster::ValidUtf8(key) || (!actor && !console) || expected > 0x7fffffffffffffffULL ||
             boost::json::serialize(document).size() > 256 * 1024) return false;
         std::lock_guard<std::mutex> lock(_state->Lock);
         auto found = _state->Realms.find(realm);
         if (_state->Stopping || found == _state->Realms.end() || !found->second->Ready || found->second->Pending >= 32 || _state->Pending >= 128) return false;
-        found->second->Jobs.push_back({domain, request, {{"id", request}, {"key", key}, {"expected", expected}, {"actor", actor}, {"document", std::move(document)}},
+        boost::json::object body{{"id", request}, {"key", key}, {"expected", expected}, {"actor", actor}, {"document", std::move(document)}};
+        if (!context.is_null()) body["context"] = std::move(context);
+        if (boost::json::serialize(body).size() > 256 * 1024 + 4096) return false;
+        found->second->Jobs.push_back({domain, request, std::move(body),
             std::chrono::steady_clock::now() + std::chrono::seconds(10)});
         ++found->second->Pending; ++_state->Pending; _state->Wake.notify_all(); return true;
     }

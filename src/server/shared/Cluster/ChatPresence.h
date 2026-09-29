@@ -18,6 +18,9 @@ namespace Skyfire::Chat
         std::uint32_t Account = 0;
         std::uint64_t Guid = 0, Incarnation = 0;
         std::string Name;
+        std::uint32_t Team = 0;
+        std::uint8_t Security = 0;
+        bool ProfileKnown = false, Visible = false, GMVisible = false, ChannelCrossFaction = false;
     };
     struct PresenceSnapshot
     {
@@ -39,6 +42,13 @@ namespace Skyfire::Chat
         out.U16(std::uint16_t(snapshot.Players.size()));
         for (auto const& player : snapshot.Players)
         { out.U32(player.Account); Write64(out, player.Guid); Write64(out, player.Incarnation); out.String(player.Name); }
+        // Optional profile trailer permits existing presence senders to drain safely.
+        out.U8(1); out.U16(std::uint16_t(snapshot.Players.size()));
+        for(auto const& player:snapshot.Players)
+        {
+            Write64(out,player.Guid); out.U32(player.Team); out.U8(player.Security);
+            out.U8(std::uint8_t(player.ProfileKnown) | player.Visible << 1 | player.GMVisible << 2 | player.ChannelCrossFaction << 3);
+        }
         return out;
     }
     inline bool DecodePresence(std::vector<std::uint8_t> const& bytes, PresenceSnapshot& snapshot)
@@ -58,6 +68,17 @@ namespace Skyfire::Chat
                 !Read64(in, player.Incarnation) || !player.Incarnation || !in.String(player.Name, 48) ||
                 !guids.insert(player.Guid).second || !names.insert(player.Name).second) return false;
             decoded.Players.push_back(std::move(player));
+        }
+        if (!in.End())
+        {
+            std::uint8_t version; std::uint16_t profiles;
+            if(!in.U8(version) || version!=1 || !in.U16(profiles) || profiles!=decoded.Players.size()) return false;
+            for(auto& player:decoded.Players)
+            {
+                std::uint64_t guid; std::uint8_t flags;
+                if(!Read64(in,guid) || guid!=player.Guid || !in.U32(player.Team) || !in.U8(player.Security) || player.Security>4 || !in.U8(flags) || flags>15) return false;
+                player.ProfileKnown=flags&1; player.Visible=flags&2; player.GMVisible=flags&4; player.ChannelCrossFaction=flags&8;
+            }
         }
         if (!in.End()) return false;
         snapshot = std::move(decoded); return true;
@@ -115,6 +136,64 @@ namespace Skyfire::Chat
             if (found == entry->second.PlayersByGuid.end()) return nullptr;
             auto const& player = entry->second.Snapshot.Players[found->second];
             return player.Incarnation == incarnation ? &player : nullptr;
+        }
+        PlayerPresence const* FindGuid(std::uint32_t realm, std::uint64_t guid, std::uint64_t now) const
+        {
+            for (auto const& entry : _entries)
+            {
+                if (entry.first.first != realm || now >= entry.second.Expires) continue;
+                auto found = entry.second.PlayersByGuid.find(guid);
+                if (found != entry.second.PlayersByGuid.end()) return &entry.second.Snapshot.Players[found->second];
+            }
+            return nullptr;
+        }
+        PlayerPresence const* FindAny(std::uint32_t realm, std::uint64_t guid, std::uint64_t incarnation, std::uint64_t now) const
+        {
+            for (auto const& entry : _entries)
+            {
+                if (entry.first.first != realm || now >= entry.second.Expires) continue;
+                auto found = entry.second.PlayersByGuid.find(guid);
+                if (found == entry.second.PlayersByGuid.end()) continue;
+                auto const& player = entry.second.Snapshot.Players[found->second];
+                if (player.Incarnation == incarnation) return &player;
+            }
+            return nullptr;
+        }
+        PlayerPresence const* FindByName(std::uint32_t realm, std::string const& name, std::uint64_t now) const
+        {
+            for (auto const& entry : _entries)
+                if (entry.first.first == realm && now < entry.second.Expires)
+                    for (auto const& player : entry.second.Snapshot.Players)
+                        if (player.Name == name) return &player;
+            return nullptr;
+        }
+        PlayerPresence const* FindByGuid(std::uint32_t realm, std::uint64_t guid, std::uint64_t now) const
+        {
+            for (auto const& entry : _entries)
+            {
+                if (entry.first.first != realm || now >= entry.second.Expires) continue;
+                auto found = entry.second.PlayersByGuid.find(guid);
+                if (found != entry.second.PlayersByGuid.end()) return &entry.second.Snapshot.Players[found->second];
+            }
+            return nullptr;
+        }
+        bool HasGeneration(std::uint32_t realm, std::string const& node, std::string const& generation, std::uint64_t now) const
+        {
+            auto entry = _entries.find({realm, node});
+            return entry != _entries.end() && now < entry->second.Expires && entry->second.Snapshot.Generation == generation;
+        }
+        bool Locate(std::uint32_t realm, std::uint64_t guid, std::uint64_t incarnation, std::uint64_t now,
+            std::string& node, std::string& generation) const
+        {
+            for (auto const& entry : _entries)
+            {
+                if (entry.first.first != realm || now >= entry.second.Expires) continue;
+                auto found = entry.second.PlayersByGuid.find(guid);
+                if (found == entry.second.PlayersByGuid.end() ||
+                    entry.second.Snapshot.Players[found->second].Incarnation != incarnation) continue;
+                node = entry.first.second; generation = entry.second.Snapshot.Generation; return true;
+            }
+            return false;
         }
         std::uint32_t Players() const
         {

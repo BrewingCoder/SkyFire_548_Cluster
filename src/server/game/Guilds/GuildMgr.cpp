@@ -5,6 +5,8 @@
 
 #include "Common.h"
 #include "GuildMgr.h"
+#include "GuildService.h"
+#include <cstdlib>
 
 GuildMgr::GuildMgr() : NextGuildId(1)
 { }
@@ -23,6 +25,15 @@ void GuildMgr::AddGuild(Guild* guild)
 void GuildMgr::RemoveGuild(uint32 guildId)
 {
     GuildStore.erase(guildId);
+}
+
+std::vector<uint32> GuildMgr::GetGuildIds() const
+{
+    std::vector<uint32> result;
+    result.reserve(GuildStore.size());
+    for (auto const& entry : GuildStore) result.push_back(entry.first);
+    std::sort(result.begin(), result.end());
+    return result;
 }
 
 void GuildMgr::SaveGuilds()
@@ -102,6 +113,25 @@ uint32 GuildMgr::GetXPForGuildLevel(uint8 level) const
 
 void GuildMgr::LoadGuilds()
 {
+    if (Skyfire::Chat::GuildService::Enabled())
+    {
+        // The chat service owns these rows. Reject broken imported projections
+        // instead of issuing legacy startup repairs behind its revision fence.
+        for (char const* query : {
+            "SELECT COUNT(*) FROM guild_rank r LEFT JOIN guild g ON g.guildid=r.guildid WHERE g.guildid IS NULL",
+            "SELECT COUNT(*) FROM guild_member m LEFT JOIN guild g ON g.guildid=m.guildid LEFT JOIN characters c ON c.guid=m.guid WHERE g.guildid IS NULL OR c.guid IS NULL",
+            "SELECT COUNT(*) FROM guild_bank_right r LEFT JOIN guild g ON g.guildid=r.guildid WHERE g.guildid IS NULL",
+            "SELECT COUNT(*) FROM guild_bank_tab t LEFT JOIN guild g ON g.guildid=t.guildid WHERE g.guildid IS NULL",
+            "SELECT COUNT(*) FROM guild_bank_item i LEFT JOIN guild g ON g.guildid=i.guildid WHERE g.guildid IS NULL"})
+        {
+            auto result = CharacterDatabase.Query(query);
+            if (!result || result->Fetch()[0].GetUInt64())
+            {
+                SF_LOG_ERROR("server.loading", "Authoritative guild projection has orphaned rows or could not be validated. Repair the character database before starting world.");
+                std::exit(1);
+            }
+        }
+    }
     // 1. Load all guilds
     SF_LOG_INFO("server.loading", "Loading guilds definitions...");
     {
@@ -147,7 +177,7 @@ void GuildMgr::LoadGuilds()
         uint32 oldMSTime = getMSTime();
 
         // Delete orphaned guild rank entries before loading the valid ones
-        CharacterDatabase.DirectExecute("DELETE gr FROM guild_rank gr LEFT JOIN guild g ON gr.guildId = g.guildId WHERE g.guildId IS NULL");
+        if (!Skyfire::Chat::GuildService::Enabled()) CharacterDatabase.DirectExecute("DELETE gr FROM guild_rank gr LEFT JOIN guild g ON gr.guildId = g.guildId WHERE g.guildId IS NULL");
 
         //                                                         0    1      2       3                4
         QueryResult result = CharacterDatabase.Query("SELECT guildid, rid, rname, rights, BankMoneyPerDay FROM guild_rank ORDER BY guildid ASC, rid ASC");
@@ -180,8 +210,8 @@ void GuildMgr::LoadGuilds()
         uint32 oldMSTime = getMSTime();
 
         // Delete orphaned guild member entries before loading the valid ones
-        CharacterDatabase.DirectExecute("DELETE gm FROM guild_member gm LEFT JOIN guild g ON gm.guildId = g.guildId WHERE g.guildId IS NULL");
-        CharacterDatabase.DirectExecute("DELETE gm FROM guild_member_withdraw gm LEFT JOIN guild_member g ON gm.guid = g.guid WHERE g.guid IS NULL");
+        if (!Skyfire::Chat::GuildService::Enabled()) CharacterDatabase.DirectExecute("DELETE gm FROM guild_member gm LEFT JOIN guild g ON gm.guildId = g.guildId WHERE g.guildId IS NULL");
+        if (!Skyfire::Chat::GuildService::Enabled()) CharacterDatabase.DirectExecute("DELETE gm FROM guild_member_withdraw gm LEFT JOIN guild_member g ON gm.guid = g.guid WHERE g.guid IS NULL");
 
         //           0           1        2            3      4        5       6       7       8       9       10
         QueryResult result = CharacterDatabase.Query("SELECT gm.guildid, gm.guid, member_rank, pnote, offnote, w.tab0, w.tab1, w.tab2, w.tab3, w.tab4, w.tab5, "
@@ -218,7 +248,7 @@ void GuildMgr::LoadGuilds()
         uint32 oldMSTime = getMSTime();
 
         // Delete orphaned guild bank right entries before loading the valid ones
-        CharacterDatabase.DirectExecute("DELETE gbr FROM guild_bank_right gbr LEFT JOIN guild g ON gbr.guildId = g.guildId WHERE g.guildId IS NULL");
+        if (!Skyfire::Chat::GuildService::Enabled()) CharacterDatabase.DirectExecute("DELETE gbr FROM guild_bank_right gbr LEFT JOIN guild g ON gbr.guildId = g.guildId WHERE g.guildId IS NULL");
 
         //      0        1      2    3        4
         QueryResult result = CharacterDatabase.Query("SELECT guildid, TabId, rid, gbright, SlotPerDay FROM guild_bank_right ORDER BY guildid ASC, TabId ASC");
@@ -250,7 +280,7 @@ void GuildMgr::LoadGuilds()
     {
         uint32 oldMSTime = getMSTime();
 
-        CharacterDatabase.DirectPExecute("DELETE FROM guild_eventlog WHERE LogGuid > %u", sWorld->getIntConfig(WorldIntConfigs::CONFIG_GUILD_EVENT_LOG_COUNT));
+        if (!Skyfire::Chat::GuildService::Enabled()) CharacterDatabase.DirectPExecute("DELETE FROM guild_eventlog WHERE LogGuid > %u", sWorld->getIntConfig(WorldIntConfigs::CONFIG_GUILD_EVENT_LOG_COUNT));
 
         //          0        1        2          3            4            5        6
         QueryResult result = CharacterDatabase.Query("SELECT guildid, LogGuid, EventType, PlayerGuid1, PlayerGuid2, NewRank, TimeStamp FROM guild_eventlog ORDER BY TimeStamp DESC, LogGuid DESC");
@@ -283,7 +313,7 @@ void GuildMgr::LoadGuilds()
         uint32 oldMSTime = getMSTime();
 
         // Remove log entries that exceed the number of allowed entries per guild
-        CharacterDatabase.DirectPExecute("DELETE FROM guild_bank_eventlog WHERE LogGuid > %u", sWorld->getIntConfig(WorldIntConfigs::CONFIG_GUILD_BANK_EVENT_LOG_COUNT));
+        if (!Skyfire::Chat::GuildService::Enabled()) CharacterDatabase.DirectPExecute("DELETE FROM guild_bank_eventlog WHERE LogGuid > %u", sWorld->getIntConfig(WorldIntConfigs::CONFIG_GUILD_BANK_EVENT_LOG_COUNT));
 
         //          0        1      2        3          4           5            6               7          8
         QueryResult result = CharacterDatabase.Query("SELECT guildid, TabId, LogGuid, EventType, PlayerGuid, ItemOrMoney, ItemStackCount, DestTabId, TimeStamp FROM guild_bank_eventlog ORDER BY TimeStamp DESC, LogGuid DESC");
@@ -315,7 +345,7 @@ void GuildMgr::LoadGuilds()
     {
         uint32 oldMSTime = getMSTime();
 
-        CharacterDatabase.DirectPExecute("DELETE FROM guild_newslog WHERE LogGuid > %u", sWorld->getIntConfig(WorldIntConfigs::CONFIG_GUILD_NEWS_LOG_COUNT));
+        if (!Skyfire::Chat::GuildService::Enabled()) CharacterDatabase.DirectPExecute("DELETE FROM guild_newslog WHERE LogGuid > %u", sWorld->getIntConfig(WorldIntConfigs::CONFIG_GUILD_NEWS_LOG_COUNT));
 
         //      0        1        2          3           4      5      6
         QueryResult result = CharacterDatabase.Query("SELECT guildid, LogGuid, EventType, PlayerGuid, Flags, Value, Timestamp FROM guild_newslog ORDER BY TimeStamp DESC, LogGuid DESC");
@@ -346,7 +376,7 @@ void GuildMgr::LoadGuilds()
         uint32 oldMSTime = getMSTime();
 
         // Delete orphaned guild bank tab entries before loading the valid ones
-        CharacterDatabase.DirectExecute("DELETE gbt FROM guild_bank_tab gbt LEFT JOIN guild g ON gbt.guildId = g.guildId WHERE g.guildId IS NULL");
+        if (!Skyfire::Chat::GuildService::Enabled()) CharacterDatabase.DirectExecute("DELETE gbt FROM guild_bank_tab gbt LEFT JOIN guild g ON gbt.guildId = g.guildId WHERE g.guildId IS NULL");
 
         //         0        1      2        3        4
         QueryResult result = CharacterDatabase.Query("SELECT guildid, TabId, TabName, TabIcon, TabText FROM guild_bank_tab ORDER BY guildid ASC, TabId ASC");
@@ -379,7 +409,7 @@ void GuildMgr::LoadGuilds()
         uint32 oldMSTime = getMSTime();
 
         // Delete orphan guild bank items
-        CharacterDatabase.DirectExecute("DELETE gbi FROM guild_bank_item gbi LEFT JOIN guild g ON gbi.guildId = g.guildId WHERE g.guildId IS NULL");
+        if (!Skyfire::Chat::GuildService::Enabled()) CharacterDatabase.DirectExecute("DELETE gbi FROM guild_bank_item gbi LEFT JOIN guild g ON gbi.guildId = g.guildId WHERE g.guildId IS NULL");
 
         //          0            1                2      3         4        5      6             7                 8           9           10
         QueryResult result = CharacterDatabase.Query("SELECT creatorGuid, giftCreatorGuid, count, duration, charges, flags, enchantments, randomPropertyId, durability, playedTime, text, "

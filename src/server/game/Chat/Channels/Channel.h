@@ -7,6 +7,8 @@
 #define SF_CHANNEL_H
 
 #include "Opcodes.h"
+#include "Cluster/ChatChannels.h"
+#include "Cluster/ChatClient.h"
 #include "SharedDefines.h"
 #include "WorldPacket.h"
 #include <list>
@@ -110,6 +112,8 @@ class Channel
         PlayerInfo() : player(0), flags(0) { }
         uint64 player;
         uint8 flags;
+        uint8 security = 0;
+        bool profileKnown = false, visible = false;
 
         bool HasFlag(uint8 flag) const { return flags & flag; }
         void SetFlag(uint8 flag) { if (!HasFlag(flag)) flags |= flag; }
@@ -135,6 +139,9 @@ class Channel
 
 public:
     Channel(std::string const& name, uint32 channel_id, uint32 Team = 0);
+    static bool ServiceEnabled();
+    static void HandleServiceResult(Skyfire::Chat::ServiceResult const& result);
+    static void HandleServiceEvent(Skyfire::Chat::ServiceEvent const& event);
     std::string const& GetName() const { return _name; }
     uint32 GetChannelId() const { return _channelId; }
     bool IsConstant() const { return _channelId != 0; }
@@ -170,10 +177,15 @@ public:
     void DeVoice(uint64 guid1, uint64 guid2);
     void JoinNotify(ObjectGuid UserGUID, uint32 ChannelID, uint8 ChannelFlags, uint8 UserFlags, std::string const& ChannelName); // invisible notify                                          // invisible notify
     void LeaveNotify(ObjectGuid UserGUID, uint32 ChannelID, uint8 ChannelFlags, std::string const& ChannelName);                 // invisible notify  
-    void SetOwnership(bool ownership) { _ownership = ownership; };
+    void SetOwnership(bool ownership) { if (!ServiceEnabled()) _ownership = ownership; };
+    void SetOwnership(Player const* player, bool ownership) { ServiceCommand(player, Skyfire::Chat::ChannelAction::Ownership, {}, {}, {}, 0, ownership); }
     static void CleanOldChannelsInDB();
 
 private:
+    bool ServiceCommand(Player const* player, Skyfire::Chat::ChannelAction action, std::string const& target = {},
+        std::string const& password = {}, std::string const& text = {}, uint32 language = 0, bool value = false, bool silent = false);
+    void ApplyServiceUpdate(Player* recipient, Skyfire::Chat::ChannelUpdate const& update);
+    uint64 _serviceRevision = 0;
     // initial packet data (notify type and channel name)
     void MakeNotifyPacket(WorldPacket* data, uint8 notify_type);
     // type specific packet data

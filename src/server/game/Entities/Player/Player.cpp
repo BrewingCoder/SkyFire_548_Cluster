@@ -36,6 +36,7 @@
 #include "Group.h"
 #include "GroupMgr.h"
 #include "Guild.h"
+#include "GuildService.h"
 #include "GuildMgr.h"
 #include "InstanceSaveMgr.h"
 #include "InstanceScript.h"
@@ -3034,6 +3035,7 @@ void Player::SetGMVisible(bool on)
 
         m_serverSideVisibility.SetValue(SERVERSIDE_VISIBILITY_GM, uint32(GetSession()->GetSecurity()));
     }
+    if (IsInWorld()) sWorld->PublishChatPresence();
 }
 
 bool Player::IsGroupVisibleFor(Player const* p) const
@@ -4904,9 +4906,12 @@ void Player::DeleteFromDB(uint64 playerguid, uint32 accountId, bool updateRealmC
     // bones will be deleted by corpse/bones deleting thread shortly
     sObjectAccessor->ConvertCorpseForPlayer(playerguid);
 
-    if (uint32 guildId = GetGuildIdFromDB(playerguid))
-        if (Guild* guild = sGuildMgr->GetGuildById(guildId))
-            guild->DeleteMember(guid, false, false, true);
+    // Character service changes membership atomically with character deletion.
+    // Do not publish a guild change before that transaction commits.
+    if (!Skyfire::Chat::GuildService::Enabled())
+        if (uint32 guildId = GetGuildIdFromDB(playerguid))
+            if (Guild* guild = sGuildMgr->GetGuildById(guildId))
+                guild->DeleteMember(guid, false, false, true);
 
     // the player was uninvited already on logout so just remove from group
     PreparedStatement* stmt = CharacterDatabase.GetPreparedStatement(CHAR_SEL_GROUP_MEMBER);

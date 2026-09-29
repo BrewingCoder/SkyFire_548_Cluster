@@ -9,11 +9,17 @@ int main()
     using namespace Skyfire::Chat;
     auto check = [](bool ok) { if (!ok) throw std::runtime_error("Chat presence invariant failed"); };
     PresenceSnapshot snapshot{std::string(64, 'a'), 1, {{12, 42, 1, "Player"}}};
+    snapshot.Players[0].ProfileKnown = true; snapshot.Players[0].Visible = true;
+    snapshot.Players[0].Team = 469;
     auto payload = EncodePresence(snapshot);
     PresenceSnapshot decoded;
     check(DecodePresence(payload.Bytes, decoded) && decoded.Players[0].Guid == 42);
+    check(decoded.Players[0].ProfileKnown && decoded.Players[0].Visible && decoded.Players[0].Team == 469);
+    std::size_t legacySize = payload.Bytes.size() - 3 - snapshot.Players.size() * 14;
+    check(DecodePresence(std::vector<std::uint8_t>(payload.Bytes.begin(), payload.Bytes.begin() + legacySize), decoded));
+    check(!decoded.Players[0].ProfileKnown);
     for (std::size_t size = 0; size < payload.Bytes.size(); ++size)
-        check(!DecodePresence(std::vector<std::uint8_t>(payload.Bytes.begin(), payload.Bytes.begin() + size), decoded));
+        if (size != legacySize) check(!DecodePresence(std::vector<std::uint8_t>(payload.Bytes.begin(), payload.Bytes.begin() + size), decoded));
     payload.Bytes.push_back(0); check(!DecodePresence(payload.Bytes, decoded));
     auto invalid = snapshot; invalid.Players.push_back(invalid.Players.front());
     check(!DecodePresence(EncodePresence(invalid).Bytes, decoded));

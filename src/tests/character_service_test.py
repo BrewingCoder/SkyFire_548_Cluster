@@ -57,6 +57,10 @@ class ProtocolTests(unittest.TestCase):
         self.assertEqual(hashlib.pbkdf2_hmac('sha256', b'secret', bytes.fromhex(salt), int(count)).hex(), digest)
         self.assertEqual(channel_key('PRIVATE', 469), channel_key('private', 469))
         self.assertNotEqual(channel_key('private', 469), channel_key('private', 67))
+        self.assertNotEqual(channel_key('Straße', 469), channel_key('STRASSE', 469))
+        self.assertEqual(channel_key('STRAẞE', 469), channel_key('Straße', 469))
+        self.assertNotEqual(channel_key('é', 469), channel_key('e\u0301', 469))
+        self.assertEqual(channel_key('ЁЖ', 469), channel_key('ёж', 469))
         with self.assertRaises(ValueError):
             channel_document(('Private', 469, 1, 1, '', 'not-a-guid'))
         with self.assertRaises(ValueError):
@@ -141,7 +145,7 @@ class ProtocolTests(unittest.TestCase):
         self.assertIsInstance(document('channels', channel), bytes)
         for change in ({'password_verifier':'plaintext'}, {'bans':[1,1]}, {'team':True}, {'sql':'DELETE FROM characters'}, {'name':'x'*129}):
             with self.assertRaises(ValueError): document('channels', channel | change)
-        guild = dict(id=1,name='Guild',leader=1,motd='',info='',ranks=[dict(name='Leader',rights=0)],
+        guild = dict(id=1,name='Guild',leader=1,motd='',info='',ranks=[dict(name='Leader',rights=0),dict(name='Member',rights=64)],
                      members=[dict(guid=1,rank=0,public_note='',officer_note='private')])
         self.assertIsInstance(document('guilds',guild),bytes)
         for change in ({'leader':2}, {'bank_money':10}, {'ranks':[]}, {'members':guild['members']*2}):
@@ -176,7 +180,7 @@ class DatabaseTests(unittest.TestCase):
         with cls.admin.cursor() as cursor:
             cursor.execute('CREATE DATABASE `'+cls.schema+'` CHARACTER SET utf8mb4')
             cursor.execute('CREATE TABLE `'+cls.schema+'`.characters (guid INT UNSIGNED PRIMARY KEY,name VARCHAR(64),money BIGINT UNSIGNED NOT NULL DEFAULT 0) ENGINE=InnoDB')
-            cursor.execute('INSERT INTO `'+cls.schema+'`.characters VALUES(1,%s,0)',("Tester O'é›ª",))
+            cursor.execute('INSERT INTO `'+cls.schema+'`.characters VALUES(1,%s,0)',("Tester O'Ã©â€ºÂª",))
             cursor.execute('CREATE TABLE `'+cls.schema+'`.gm_tickets (id INT PRIMARY KEY, flags BIT(8)) ENGINE=InnoDB')
             cursor.execute("INSERT INTO `"+cls.schema+"`.gm_tickets VALUES(1,b'10101010')")
             cursor.execute('CREATE TABLE `'+cls.schema+'`.binary_fixture (payload BLOB) ENGINE=InnoDB')
@@ -185,12 +189,12 @@ class DatabaseTests(unittest.TestCase):
             # CI may promote the pending migration to a dated release filename.
             migrations = [path.read_text() for folder in ('pending_updates', 'updates')
                           for path in (ROOT/'sql'/folder/'characters').glob('*.sql')
-                          if 'CREATE TABLE character_social_owners (' in path.read_text()]
-            if len(migrations) != 1:
-                raise RuntimeError('Expected one social-domain schema migration')
-            migration = migrations[0]
-            for statement in migration.split(';'):
-                if statement.strip(): cursor.execute(statement)
+                          if re.search(r'CREATE TABLE character_social_(owners|guild_members|consumed_items) \(', path.read_text())]
+            if len(migrations) != 3:
+                raise RuntimeError('Expected social-domain and membership schema migrations')
+            for migration in migrations:
+                for statement in migration.split(';'):
+                    if statement.strip(): cursor.execute(statement)
         cls.config=dict(realm_id=1,mysql_host=host,mysql_port=int(port),mysql_user=user,
                         mysql_password=password,mysql_database=cls.schema)
 
@@ -387,6 +391,88 @@ class DatabaseTests(unittest.TestCase):
         finally:
             db.close()
 
+    def test_social_guild_membership_is_unique_and_atomic(self):
+        from social_store import canonical
+        db = CharacterDatabase(self.config | {'allowed_chat_nodes':['chat-a']}, SERVICE/'statements.json')
+        instance = secrets.token_hex(16)
+        session = None
+        try:
+            session, epoch = db.social.attach('chat-a', b'\1'+u32(1)+blob(instance)+blob('guilds'))
+            def write(guild_id, members, expected=0, value=True):
+                doc = dict(id=guild_id,name='Fixture',leader=members[0],motd='',info='',
+                           ranks=[dict(name='Leader',rights=255),dict(name='Member',rights=64)],
+                           members=[dict(guid=guid,rank=int(index != 0),public_note='',officer_note='') for index,guid in enumerate(members)])
+                request = dict(id=secrets.token_hex(16),key='guild-'+str(guild_id),expected=expected,actor=members[0],document=doc if value else None)
+                return json.loads(db.social.execute('chat-a',session,epoch,b'\x12'+blob(canonical(request))))['revision']
+            first = write(1001,[101,102])
+            with self.assertRaises(ValueError): write(1002,[103,102])
+            with self.admin.cursor() as cursor:
+                cursor.execute('SELECT guid FROM character_social_guild_members WHERE realm=1 ORDER BY guid')
+                self.assertEqual([row[0] for row in cursor.fetchall()],[101,102])
+            # A failed receipt must roll back the membership projection as well.
+            with self.admin.cursor() as cursor:
+                cursor.execute("CREATE TRIGGER reject_guild_receipt BEFORE INSERT ON character_social_receipts FOR EACH ROW SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='fixture'")
+            try:
+                with self.assertRaises(Exception): write(1001,[101,104],first)
+            finally:
+                with self.admin.cursor() as cursor: cursor.execute('DROP TRIGGER reject_guild_receipt')
+            with self.assertRaises(ValueError): write(1002,[103,102])
+            write(1001,[101,102],first,value=False)
+            second = write(1002,[103,102])
+            db.social.detach(session)
+            session, epoch = db.social.attach('chat-a',b'\1'+u32(1)+blob(instance)+blob('guilds'))
+            with self.assertRaises(ValueError): write(1003,[104,102])
+            write(1002,[103,102],second,value=False)
+        finally:
+            if session is not None: db.social.detach(session)
+            db.close()
+
+    def test_social_guild_projection_and_writer_fence(self):
+        from social_store import canonical
+        with self.admin.cursor() as cursor:
+            cursor.execute('CREATE TABLE IF NOT EXISTS guild (guildid INT, name VARCHAR(24), leaderguid INT, motd VARCHAR(128), info TEXT) ENGINE=InnoDB')
+            cursor.execute('CREATE TABLE IF NOT EXISTS guild_rank (guildid INT, rid INT, rname VARCHAR(20), rights INT) ENGINE=InnoDB')
+            cursor.execute('CREATE TABLE IF NOT EXISTS guild_member (guildid INT, guid INT, member_rank INT, pnote VARCHAR(31), offnote VARCHAR(31)) ENGINE=InnoDB')
+            cursor.execute("INSERT INTO guild VALUES(9001,'Projection',901,'Before','')")
+            cursor.execute("INSERT INTO guild_rank VALUES(9001,0,'Leader',255),(9001,1,'Member',64)")
+            cursor.execute("INSERT INTO guild_member VALUES(9001,901,0,'','')")
+        db = CharacterDatabase(self.config | {'allowed_chat_nodes':['chat-a'],'social_guild_projection':True}, SERVICE/'statements.json')
+        session = None
+        try:
+            session,epoch = db.social.attach('chat-a',b'\1'+u32(1)+blob(secrets.token_hex(16))+blob('guilds'))
+            doc = dict(id=9001,name='Projection',leader=901,motd='After',info='',
+                       ranks=[dict(name='Leader',rights=255),dict(name='Member',rights=64)],members=[dict(guid=901,rank=0,public_note='',officer_note='')])
+            message = dict(id=secrets.token_hex(16),key='guild-9001',expected=0,actor=901,document=doc)
+            def send(value):
+                return json.loads(db.social.execute('chat-a',session,epoch,b'\x12'+blob(canonical(value))))
+            revision = send(message)['revision']
+            with self.admin.cursor() as cursor:
+                cursor.execute('SELECT motd FROM guild WHERE guildid=9001')
+                self.assertEqual(cursor.fetchone()[0],'After')
+                cursor.execute("CREATE TRIGGER reject_projection_receipt BEFORE INSERT ON character_social_receipts FOR EACH ROW SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='fixture'")
+            try:
+                with self.assertRaises(Exception):
+                    send(message | {'id':secrets.token_hex(16),'expected':revision,'document':doc | {'motd':'Uncommitted'}})
+            finally:
+                with self.admin.cursor() as cursor: cursor.execute('DROP TRIGGER reject_projection_receipt')
+            with self.admin.cursor() as cursor:
+                cursor.execute('SELECT motd FROM guild WHERE guildid=9001')
+                self.assertEqual(cursor.fetchone()[0],'After')
+            for sql in ("UPDATE guild SET motd='bypass'",'DELETE FROM `guild_member`','INSERT INTO guild_rank VALUES(1,0,\'X\',0)'):
+                with self.assertRaises(ValueError): db.statement(Reader(raw(sql)))
+            db.statement(Reader(raw('SELECT guildid FROM guild')))
+            social_id=db.statement_ids['CHAR_UPD_GUILD_MOTD']
+            with self.assertRaises(ValueError): db.statement(Reader(b'\1'+u32(social_id)+u32(0)))
+            economic_id=db.statement_ids['CHAR_UPD_GUILD_BANK_MONEY']
+            db.statement(Reader(b'\1'+u32(economic_id)+u32(0)))
+        finally:
+            if session is not None: db.social.detach(session)
+            db.close()
+
+    def test_social_full_lifecycle(self):
+        from social_lifecycle_fixture import exercise
+        exercise(self,self.admin,self.config)
+
     def test_transactions_fencing_and_recovery(self):
         db=CharacterDatabase(self.config,SERVICE/'statements.json')
         first,second=secrets.token_hex(16),secrets.token_hex(16)
@@ -402,9 +488,9 @@ class DatabaseTests(unittest.TestCase):
                 db.attach('world-b',hello(second))
             query=lambda sql: rows(db.execute('world-a',first,epoch,request(2,[raw(sql)])))
             self.assertEqual(query("SELECT guid,name,money,NULL,UNHEX('610062') FROM characters WHERE guid=1"),
-                             [[b'1',"Tester O'é›ª".encode(),b'0',None,b'a\0b']])
+                             [[b'1',"Tester O'Ã©â€ºÂª".encode(),b'0',None,b'a\0b']])
             ids={entry['name']:entry['id'] for entry in json.loads((SERVICE/'statements.json').read_text())}
-            query_name=prepared(ids['CHAR_SEL_CHECK_NAME'],[b'\2'+blob("Tester O'é›ª")])
+            query_name=prepared(ids['CHAR_SEL_CHECK_NAME'],[b'\2'+blob("Tester O'Ã©â€ºÂª")])
             self.assertEqual(rows(db.execute('world-a',first,epoch,request(2,[query_name]))),[[b'1']])
             save=request(3,[raw('UPDATE characters SET money=money+1 WHERE guid=1')])
             db.execute('world-a',first,epoch,save)

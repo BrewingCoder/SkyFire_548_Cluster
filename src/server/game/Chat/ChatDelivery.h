@@ -22,6 +22,8 @@ namespace Skyfire::Chat::Delivery
         std::uint32_t language, std::string const& prefix, AudienceKind kind, int subgroup = -1,
         bool ignoreOtherGroups = false, std::uint64_t ignore = 0);
     void Update();
+    void CompleteGroup(ServiceResult const& result);
+    void ReceiveGroup(ServiceEvent const& event);
     bool SpatialMessage(Player* sender, WorldPacket const& packet, std::string const& text,
         std::uint32_t language, float range, bool ownTeamOnly = false);
     bool Control(WorldSession* session, WorldPacket& packet, void (WorldSession::*handler)(WorldPacket&),

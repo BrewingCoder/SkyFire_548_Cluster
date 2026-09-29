@@ -2,7 +2,7 @@
 #   SkyFire World Server configuration file    #
 ################################################
 [worldserver]
-ConfVersion = 2026272806
+ConfVersion = 2026272807
 
 ###################################################################################################
 # SECTION INDEX
@@ -3436,7 +3436,7 @@ MapData.VerifyCache = 0
 MapData.PrefetchRadius = 1
 MapData.PrefetchTilesPerSecond = 1
 
-# Optional realm-scoped presence publisher. Chat gameplay routing is not enabled yet.
+# Realm-scoped chat transport and presence publisher.
 ChatService.Enable = 0
 # Match chatserver's default IPv4 listener; localhost may try IPv6 first and delay every request.
 # Remote endpoints must also match the chat certificate's subject alternative names.
@@ -3452,6 +3452,12 @@ Cluster.CRL = ""
 
 # Route player messages and channel/guild administration through chatserver.
 # Requires ChatService.Enable and matching world/chat/hub binaries. Includes whispers.
-# World retains final spatial/rank/RBAC checks and current persistence ownership.
+# World retains gameplay, visibility and actor RBAC checks.
 # Failed/expired requests are not retried locally. Restart world after changing.
 ChatService.Messages = 0
+
+# Durable channel and guild ownership. Enable only after the offline social import,
+# Chat.Persistence.Enable=1, and character social_guild_projection=true are deployed.
+# All nodes for a realm must agree. Enabled authorities never fall back to legacy SQL.
+Chat.ChannelAuthority.Enable = 0
+Chat.GuildAuthority.Enable = 0

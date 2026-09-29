@@ -32,6 +32,7 @@ public:
     void RemoveGuild(uint32 guildId);
 
     void SaveGuilds();
+    std::vector<uint32> GetGuildIds() const;
 
     void ResetReputationCaps();
 

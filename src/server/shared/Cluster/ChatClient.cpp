@@ -33,6 +33,15 @@ namespace Skyfire::Chat
             struct RouteQueued { AudienceProjection Projection; RoutedMessage Message; std::uint8_t Lane; std::chrono::steady_clock::time_point Deadline; };
             std::deque<RouteQueued> Routes;
             std::deque<RouteResult> RouteResults;
+            struct ServiceQueued { ServiceRequest Request; std::chrono::steady_clock::time_point Deadline; };
+            std::deque<ServiceQueued> Services;
+            std::deque<ServiceResult> ServiceResults;
+            std::deque<ServiceEvent> ServiceEvents;
+            std::map<std::uint32_t, unsigned> ServiceAccounts;
+            std::uint64_t ServiceSequence = 0, EventCursor = 0;
+            std::string EventEpoch = std::string(64, '0');
+            unsigned ServicesPending = 0;
+            std::size_t EventBytes = 0;
             std::uint64_t RouteSequence = 0;
             unsigned RoutesPending = 0;
             std::array<unsigned, 3> LanePending{};
@@ -105,12 +114,12 @@ namespace Skyfire::Chat
                                         auto expected = request.Bytes; expected.resize(ProbeSize); expected[6] = 0x80;
                                         if (operation == 3) expected.insert(expected.end(), payload.Bytes.begin(), payload.Bytes.end());
                                         if (received || response != expected) { io.stop(); return; }
-                                        if (operation != 4 || !routed) { success = true; io.stop(); return; }
+                                        if ((operation != 4 && operation != 5 && operation != 6) || !routed) { success = true; io.stop(); return; }
                                         boost::asio::async_read(stream, boost::asio::buffer(responseLength), [&](boost::system::error_code lengthError, std::size_t)
                                         {
                                             std::uint32_t length = (std::uint32_t(responseLength[0]) << 24) | (std::uint32_t(responseLength[1]) << 16) |
                                                 (std::uint32_t(responseLength[2]) << 8) | responseLength[3];
-                                            if (lengthError || length < 2 || length > 65538) { io.stop(); return; }
+                                            if (lengthError || length < 2 || length > (operation == 4 ? 65538u : std::uint32_t(MaxServiceFrame))) { io.stop(); return; }
                                             routed->resize(length);
                                             boost::asio::async_read(stream, boost::asio::buffer(*routed), [&](boost::system::error_code bodyError, std::size_t)
                                             { success = !bodyError; io.stop(); });
@@ -130,23 +139,62 @@ namespace Skyfire::Chat
             void Run()
             {
                 std::uint64_t sequence = 0;
-                bool available = false, first = true, lastRoute = false;
+                bool available = false, first = true, lastRoute = false, lastService = false;
+                auto nextPoll = std::chrono::steady_clock::now();
+                bool eventBacklog = false; unsigned pollBurst = 0;
                 for (;;)
                 {
                     PresenceSnapshot snapshot;
                     std::optional<Queued> whisper;
                     std::optional<RouteQueued> route;
+                    std::optional<ServiceQueued> service;
+                    bool poll = false, publish = false;
                     {
                         std::unique_lock<std::mutex> lock(Lock);
-                        Wake.wait(lock, [&] { return Stopping || Pending.has_value() || !Whispers.empty() || !Routes.empty(); });
+                        Wake.wait_for(lock, std::chrono::milliseconds(100), [&] { return Stopping || Pending.has_value() || !Whispers.empty() || !Routes.empty() || !Services.empty() || (eventBacklog && ServiceEvents.size() < 96 && EventBytes < 1024 * 1024); });
                         if (Stopping) return;
                         auto now = std::chrono::steady_clock::now();
                         while (!Whispers.empty() && now >= Whispers.front().Deadline)
                         { Results.push_back({std::move(Whispers.front().Message), false, Whispers.front().Deadline}); Whispers.pop_front(); }
-                        if (Pending) { snapshot.Players = std::move(*Pending); Pending.reset(); }
-                        else if (!Routes.empty() && (Whispers.empty() || !lastRoute)) { route = std::move(Routes.front()); Routes.pop_front(); lastRoute = true; }
-                        else if (!Whispers.empty()) { whisper = std::move(Whispers.front()); Whispers.pop_front(); lastRoute = false; }
-                        else continue;
+                        if (Pending) { snapshot.Players = std::move(*Pending); Pending.reset(); publish = true; }
+                        else if (available && (eventBacklog || now >= nextPoll) && ServiceEvents.size() < 96 && EventBytes < 1024 * 1024 &&
+                            (pollBurst < 4 || (Services.empty() && Routes.empty() && Whispers.empty()))) poll = true;
+                        else if (!Services.empty() && (!lastService || (Routes.empty() && Whispers.empty())))
+                        { service = std::move(Services.front()); Services.pop_front(); lastService = true; pollBurst = 0; }
+                        else if (!Routes.empty() && (Whispers.empty() || !lastRoute)) { route = std::move(Routes.front()); Routes.pop_front(); lastRoute = true; lastService = false; pollBurst = 0; }
+                        else if (!Whispers.empty()) { whisper = std::move(Whispers.front()); Whispers.pop_front(); lastRoute = false; lastService = false; pollBurst = 0; }
+                        else if (!Services.empty()) { service = std::move(Services.front()); Services.pop_front(); lastService = true; pollBurst = 0; }
+                        if (!publish && !service && !route && !whisper && !poll) continue;
+                    }
+                    if (poll)
+                    {
+                        eventBacklog = false;
+                        nextPoll = std::chrono::steady_clock::now() + std::chrono::milliseconds(100);
+                        Cluster::Writer payload; payload.String(Generation); Write64(payload, EventCursor); payload.String(EventEpoch);
+                        std::vector<std::uint8_t> bytes;
+                        if (!Send(6, payload, &bytes)) { eventBacklog = false; pollBurst = 0; continue; }
+                        Cluster::Reader in(bytes); std::string epoch; std::uint64_t cursor; std::uint16_t count;
+                        std::vector<ServiceEvent> events;
+                        bool valid = in.String(epoch, 64) && ServiceGeneration(epoch) && Read64(in, cursor) && in.U16(count) && count <= 32;
+                        auto previous = epoch == EventEpoch ? EventCursor : 0;
+                        for (unsigned i = 0; valid && i < count; ++i)
+                        { ServiceEvent event; valid = ReadServiceEvent(in, event); if (valid) events.push_back(std::move(event)); }
+                        if (!valid || !in.End() || cursor < previous || cursor - previous != count) continue;
+                        std::lock_guard<std::mutex> lock(Lock);
+                        for (auto& event : events) { EventBytes += event.Payload.size(); ServiceEvents.push_back(std::move(event)); }
+                        eventBacklog = count == 32; ++pollBurst;
+                        EventEpoch = std::move(epoch); EventCursor = cursor; continue;
+                    }
+                    if (service)
+                    {
+                        ServiceResult result; result.Request = std::move(service->Request); result.Deadline = service->Deadline;
+                        std::vector<std::uint8_t> bytes;
+                        result.Success = std::chrono::steady_clock::now() < result.Deadline &&
+                            Send(5, EncodeServiceRequest(result.Request), &bytes) && DecodeServiceResponse(bytes, result.Response) &&
+                            result.Response.Sequence == result.Request.Sequence;
+                        // A missing reply can follow a committed mutation. Never retry or execute locally.
+                        if (!result.Success) { result.Response.Sequence = result.Request.Sequence; result.Response.Status = ServiceStatus::Unknown; }
+                        std::lock_guard<std::mutex> lock(Lock); ServiceResults.push_back(std::move(result)); continue;
                     }
                     if (route)
                     {
@@ -274,6 +322,47 @@ namespace Skyfire::Chat
             --Active->RoutesPending; results.push_back(std::move(result));
         }
         return results;
+    }
+    std::uint64_t QueueServiceRequest(ServiceRequest request)
+    {
+        if (!Active || !(request.Domain == ServiceDomain::Whisper ? RouteWhispers : RouteMessages) || request.Payload.size() > MaxServicePayload) return 0;
+        std::lock_guard<std::mutex> lock(Active->Lock);
+        auto account = Active->ServiceAccounts.find(request.Account);
+        if (Active->Stopping || Active->ServicesPending >= 64 ||
+            (account != Active->ServiceAccounts.end() && account->second >= 16)) return 0;
+        request.Generation = Active->Generation; request.Sequence = ++Active->ServiceSequence;
+        ServiceRequest validated;
+        if (!DecodeServiceRequest(EncodeServiceRequest(request).Bytes, validated)) return 0;
+        auto sequence = request.Sequence;
+        ++Active->ServiceAccounts[request.Account]; ++Active->ServicesPending;
+        Active->Services.push_back({std::move(request), std::chrono::steady_clock::now() + std::chrono::seconds(10)});
+        Active->Wake.notify_one(); return sequence;
+    }
+    std::vector<ServiceResult> TakeServiceResults()
+    {
+        std::vector<ServiceResult> results;
+        if (!Active) return results;
+        std::lock_guard<std::mutex> lock(Active->Lock);
+        while (!Active->ServiceResults.empty() && results.size() < 32)
+        {
+            auto result = std::move(Active->ServiceResults.front()); Active->ServiceResults.pop_front();
+            auto account = Active->ServiceAccounts.find(result.Request.Account);
+            if (account != Active->ServiceAccounts.end() && !--account->second) Active->ServiceAccounts.erase(account);
+            --Active->ServicesPending; results.push_back(std::move(result));
+        }
+        return results;
+    }
+    std::vector<ServiceEvent> TakeServiceEvents()
+    {
+        std::vector<ServiceEvent> events;
+        if (!Active) return events;
+        std::lock_guard<std::mutex> lock(Active->Lock);
+        while (!Active->ServiceEvents.empty() && events.size() < 32)
+        {
+            Active->EventBytes -= Active->ServiceEvents.front().Payload.size();
+            events.push_back(std::move(Active->ServiceEvents.front())); Active->ServiceEvents.pop_front();
+        }
+        return events;
     }
     void StopClient() { Active.reset(); RouteWhispers = false; RouteMessages = false; }
 }

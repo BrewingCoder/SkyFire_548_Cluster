@@ -15,6 +15,7 @@
 #include "WorldPacket.h"
 
 class Item;
+namespace Skyfire::Chat { struct GuildState; struct ServiceEvent; }
 
 enum GuildMisc
 {
@@ -351,6 +352,7 @@ private:
         bool CheckStats() const;
 
         void SetPublicNote(std::string const& publicNote);
+        void ApplyChatSocial(uint8 rank, std::string const& publicNote, std::string const& officerNote);
         void SetOfficerNote(std::string const& officerNote);
         void SetZoneId(uint32 id) { m_zoneId = id; }
         void SetAchievementPoints(uint32 val) { m_achievementPoints = val; }
@@ -581,11 +583,14 @@ private:
         void SetName(std::string const& name);
 
         uint32 GetRights() const { return m_rights; }
+        void ReindexChatRank(uint8 id) { m_rankId = id; }
+        void ApplyChatSocial(std::string const& name, uint32 rights) { m_name = name; m_rights = rights; }
         void SetRights(uint32 rights);
 
         int32 GetBankMoneyPerDay() const { return m_bankMoneyPerDay; }
 
         void SetBankMoneyPerDay(uint32 money);
+        void ApplyChatBankMoney(uint32 money) { m_bankMoneyPerDay = m_rankId ? money : uint32(GUILD_WITHDRAW_MONEY_UNLIMITED); }
 
         inline int8 GetBankTabRights(uint8 tabId) const
         {
@@ -762,6 +767,10 @@ public:
     std::string const& GetInfo() const { return m_info; }
 
     bool SetName(std::string const& name);
+    bool ApplyCreateProjection(Skyfire::Chat::GuildState const& state);
+    bool ApplyChatProjection(Skyfire::Chat::GuildState const& state, uint8 removedRank = 255);
+    void ApplyDisbandProjection();
+    static void HandleChatEvent(Skyfire::Chat::ServiceEvent const& event);
 
     // Handle client commands
     void HandleRoster(WorldSession* session = NULL);
@@ -775,6 +784,7 @@ public:
     void HandleSetMemberNote(WorldSession* session, std::string const& note, uint64 guid, bool isPublic);
     void HandleSetRankInfo(WorldSession* session, uint8 rankId, std::string const& name, uint32 rights, uint32 moneyPerDay, GuildBankRightsAndSlotsVec const& rightsAndSlots);
     void HandleBuyBankTab(WorldSession* session, uint8 tabId);
+    void SendInvitationPacket(Player* invitee, std::string const& inviterName);
     void HandleInviteMember(WorldSession* session, std::string const& name);
     void HandleAcceptMember(WorldSession* session);
     void HandleLeaveMember(WorldSession* session);
@@ -901,7 +911,7 @@ private:
     {
         if (player)
             if (Member const* member = GetMember(player->GetGUID()))
-                return (_GetRankRights(member->GetRankId()) & right) != GR_RIGHT_EMPTY;
+                return (_GetRankRights(member->GetRankId()) & (right & ~uint32(GR_RIGHT_EMPTY))) != 0;
         return false;
     }
 

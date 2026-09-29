@@ -17,6 +17,7 @@
 #include "DBCStores.h"
 #include "Group.h"
 #include "Guild.h"
+#include "GuildService.h"
 #include "GuildMgr.h"
 #include "Language.h"
 #include "LFGMgr.h"
@@ -2723,8 +2724,16 @@ void WorldSession::HandleCharFactionOrRaceChange(WorldPacket& recvData)
 
                 result = CharacterDatabase.Query(stmt);
                 if (result)
-                    if (Guild* guild = sGuildMgr->GetGuildById((result->Fetch()[0]).GetUInt32()))
+                {
+                    if (Skyfire::Chat::GuildService::Enabled())
+                    {
+                        // Character service changes membership in the same faction-change transaction.
+                        stmt = CharacterDatabase.GetPreparedStatement(CHAR_DEL_GUILD_MEMBER);
+                        stmt->setUInt32(0, lowGuid); trans->Append(stmt);
+                    }
+                    else if (Guild* guild = sGuildMgr->GetGuildById((result->Fetch()[0]).GetUInt32()))
                         guild->DeleteMember(MAKE_NEW_GUID(lowGuid, 0, HIGHGUID_PLAYER));
+                }
             }
 
             if (!HasPermission(rbac::RBAC_PERM_TWO_SIDE_ADD_FRIEND))

@@ -11,7 +11,7 @@
 
 void WorldSession::HandleJoinChannel(WorldPacket& recvPacket)
 {
-    if (Skyfire::Chat::Delivery::Control(this, recvPacket, &WorldSession::HandleJoinChannel,
+    if (!Channel::ServiceEnabled() && Skyfire::Chat::Delivery::Control(this, recvPacket, &WorldSession::HandleJoinChannel,
         Skyfire::Chat::AudienceKind::ChannelControl, "HandleJoinChannel")) return;
     uint32 channelId;
     uint32 channelLength, passLength;
@@ -54,7 +54,7 @@ void WorldSession::HandleJoinChannel(WorldPacket& recvPacket)
 
 void WorldSession::HandleLeaveChannel(WorldPacket& recvPacket)
 {
-    if (Skyfire::Chat::Delivery::Control(this, recvPacket, &WorldSession::HandleLeaveChannel,
+    if (!Channel::ServiceEnabled() && Skyfire::Chat::Delivery::Control(this, recvPacket, &WorldSession::HandleLeaveChannel,
         Skyfire::Chat::AudienceKind::ChannelControl, "HandleLeaveChannel")) return;
     uint32 unk;
     std::string channelName;
@@ -78,7 +78,7 @@ void WorldSession::HandleLeaveChannel(WorldPacket& recvPacket)
 
 void WorldSession::HandleChannelList(WorldPacket& recvPacket)
 {
-    if (Skyfire::Chat::Delivery::Control(this, recvPacket, &WorldSession::HandleChannelList,
+    if (!Channel::ServiceEnabled() && Skyfire::Chat::Delivery::Control(this, recvPacket, &WorldSession::HandleChannelList,
         Skyfire::Chat::AudienceKind::ChannelControl, "HandleChannelList")) return;
     uint32 length = recvPacket.ReadBits(7);
     std::string channelName = recvPacket.ReadString(length);
@@ -94,7 +94,7 @@ void WorldSession::HandleChannelList(WorldPacket& recvPacket)
 
 void WorldSession::HandleChannelPassword(WorldPacket& recvPacket)
 {
-    if (Skyfire::Chat::Delivery::Control(this, recvPacket, &WorldSession::HandleChannelPassword,
+    if (!Channel::ServiceEnabled() && Skyfire::Chat::Delivery::Control(this, recvPacket, &WorldSession::HandleChannelPassword,
         Skyfire::Chat::AudienceKind::ChannelControl, "HandleChannelPassword")) return;
     uint32 nameLength = recvPacket.ReadBits(8);
     uint32 passLength = recvPacket.ReadBits(7);
@@ -112,7 +112,7 @@ void WorldSession::HandleChannelPassword(WorldPacket& recvPacket)
 
 void WorldSession::HandleChannelSetOwner(WorldPacket& recvPacket)
 {
-    if (Skyfire::Chat::Delivery::Control(this, recvPacket, &WorldSession::HandleChannelSetOwner,
+    if (!Channel::ServiceEnabled() && Skyfire::Chat::Delivery::Control(this, recvPacket, &WorldSession::HandleChannelSetOwner,
         Skyfire::Chat::AudienceKind::ChannelControl, "HandleChannelSetOwner")) return;
     uint32 nameLength = recvPacket.ReadBits(8) << 1;
     nameLength += recvPacket.ReadBit();
@@ -134,7 +134,7 @@ void WorldSession::HandleChannelSetOwner(WorldPacket& recvPacket)
 
 void WorldSession::HandleChannelOwner(WorldPacket& recvPacket)
 {
-    if (Skyfire::Chat::Delivery::Control(this, recvPacket, &WorldSession::HandleChannelOwner,
+    if (!Channel::ServiceEnabled() && Skyfire::Chat::Delivery::Control(this, recvPacket, &WorldSession::HandleChannelOwner,
         Skyfire::Chat::AudienceKind::ChannelControl, "HandleChannelOwner")) return;
     uint32 length = recvPacket.ReadBits(8);
     std::string channelName = recvPacket.ReadString(length);
@@ -149,7 +149,7 @@ void WorldSession::HandleChannelOwner(WorldPacket& recvPacket)
 
 void WorldSession::HandleChannelModerator(WorldPacket& recvPacket)
 {
-    if (Skyfire::Chat::Delivery::Control(this, recvPacket, &WorldSession::HandleChannelModerator,
+    if (!Channel::ServiceEnabled() && Skyfire::Chat::Delivery::Control(this, recvPacket, &WorldSession::HandleChannelModerator,
         Skyfire::Chat::AudienceKind::ChannelControl, "HandleChannelModerator")) return;
     uint32 channelLength = recvPacket.ReadBits(8);
     uint32 nameLength = recvPacket.ReadBits(7);
@@ -170,7 +170,7 @@ void WorldSession::HandleChannelModerator(WorldPacket& recvPacket)
 
 void WorldSession::HandleChannelUnmoderator(WorldPacket& recvPacket)
 {
-    if (Skyfire::Chat::Delivery::Control(this, recvPacket, &WorldSession::HandleChannelUnmoderator,
+    if (!Channel::ServiceEnabled() && Skyfire::Chat::Delivery::Control(this, recvPacket, &WorldSession::HandleChannelUnmoderator,
         Skyfire::Chat::AudienceKind::ChannelControl, "HandleChannelUnmoderator")) return;
     uint32 nameLength = recvPacket.ReadBits(7);
     uint32 channelLength = recvPacket.ReadBits(8);
@@ -191,7 +191,7 @@ void WorldSession::HandleChannelUnmoderator(WorldPacket& recvPacket)
 
 void WorldSession::HandleChannelMute(WorldPacket& recvPacket)
 {
-    if (Skyfire::Chat::Delivery::Control(this, recvPacket, &WorldSession::HandleChannelMute,
+    if (!Channel::ServiceEnabled() && Skyfire::Chat::Delivery::Control(this, recvPacket, &WorldSession::HandleChannelMute,
         Skyfire::Chat::AudienceKind::ChannelControl, "HandleChannelMute")) return;
     uint32 channelLength = recvPacket.ReadBits(8);
     uint32 nameLength = recvPacket.ReadBits(7);
@@ -212,7 +212,7 @@ void WorldSession::HandleChannelMute(WorldPacket& recvPacket)
 
 void WorldSession::HandleChannelUnmute(WorldPacket& recvPacket)
 {
-    if (Skyfire::Chat::Delivery::Control(this, recvPacket, &WorldSession::HandleChannelUnmute,
+    if (!Channel::ServiceEnabled() && Skyfire::Chat::Delivery::Control(this, recvPacket, &WorldSession::HandleChannelUnmute,
         Skyfire::Chat::AudienceKind::ChannelControl, "HandleChannelUnmute")) return;
     uint32 nameLength = recvPacket.ReadBits(8);
     uint32 channelLength = recvPacket.ReadBits(7);
@@ -233,7 +233,7 @@ void WorldSession::HandleChannelUnmute(WorldPacket& recvPacket)
 
 void WorldSession::HandleChannelInvite(WorldPacket& recvPacket)
 {
-    if (Skyfire::Chat::Delivery::Control(this, recvPacket, &WorldSession::HandleChannelInvite,
+    if (!Channel::ServiceEnabled() && Skyfire::Chat::Delivery::Control(this, recvPacket, &WorldSession::HandleChannelInvite,
         Skyfire::Chat::AudienceKind::ChannelControl, "HandleChannelInvite")) return;
     uint32 nameLength = recvPacket.ReadBits(7);
     uint32 channelLength = recvPacket.ReadBits(8);
@@ -254,7 +254,7 @@ void WorldSession::HandleChannelInvite(WorldPacket& recvPacket)
 
 void WorldSession::HandleChannelKick(WorldPacket& recvPacket)
 {
-    if (Skyfire::Chat::Delivery::Control(this, recvPacket, &WorldSession::HandleChannelKick,
+    if (!Channel::ServiceEnabled() && Skyfire::Chat::Delivery::Control(this, recvPacket, &WorldSession::HandleChannelKick,
         Skyfire::Chat::AudienceKind::ChannelControl, "HandleChannelKick")) return;
     uint32 channelLength = recvPacket.ReadBits(8);
     uint32 nameLength = recvPacket.ReadBits(7);
@@ -275,7 +275,7 @@ void WorldSession::HandleChannelKick(WorldPacket& recvPacket)
 
 void WorldSession::HandleChannelBan(WorldPacket& recvPacket)
 {
-    if (Skyfire::Chat::Delivery::Control(this, recvPacket, &WorldSession::HandleChannelBan,
+    if (!Channel::ServiceEnabled() && Skyfire::Chat::Delivery::Control(this, recvPacket, &WorldSession::HandleChannelBan,
         Skyfire::Chat::AudienceKind::ChannelControl, "HandleChannelBan")) return;
     uint32 channelLength, nameLength;
     std::string channelName, targetName;
@@ -299,7 +299,7 @@ void WorldSession::HandleChannelBan(WorldPacket& recvPacket)
 
 void WorldSession::HandleChannelUnban(WorldPacket& recvPacket)
 {
-    if (Skyfire::Chat::Delivery::Control(this, recvPacket, &WorldSession::HandleChannelUnban,
+    if (!Channel::ServiceEnabled() && Skyfire::Chat::Delivery::Control(this, recvPacket, &WorldSession::HandleChannelUnban,
         Skyfire::Chat::AudienceKind::ChannelControl, "HandleChannelUnban")) return;
     uint32 channelLength = recvPacket.ReadBits(7);
     uint32 nameLength = recvPacket.ReadBits(8);
@@ -320,7 +320,7 @@ void WorldSession::HandleChannelUnban(WorldPacket& recvPacket)
 
 void WorldSession::HandleChannelAnnouncements(WorldPacket& recvPacket)
 {
-    if (Skyfire::Chat::Delivery::Control(this, recvPacket, &WorldSession::HandleChannelAnnouncements,
+    if (!Channel::ServiceEnabled() && Skyfire::Chat::Delivery::Control(this, recvPacket, &WorldSession::HandleChannelAnnouncements,
         Skyfire::Chat::AudienceKind::ChannelControl, "HandleChannelAnnouncements")) return;
     uint32 length = recvPacket.ReadBits(8);
     std::string channelName = recvPacket.ReadString(length);
@@ -335,7 +335,7 @@ void WorldSession::HandleChannelAnnouncements(WorldPacket& recvPacket)
 
 void WorldSession::HandleChannelDisplayListQuery(WorldPacket& recvPacket)
 {
-    if (Skyfire::Chat::Delivery::Control(this, recvPacket, &WorldSession::HandleChannelDisplayListQuery,
+    if (!Channel::ServiceEnabled() && Skyfire::Chat::Delivery::Control(this, recvPacket, &WorldSession::HandleChannelDisplayListQuery,
         Skyfire::Chat::AudienceKind::ChannelControl, "HandleChannelDisplayListQuery")) return;
     // this should be OK because the 2 function _were_ the same
     HandleChannelList(recvPacket);
@@ -343,7 +343,7 @@ void WorldSession::HandleChannelDisplayListQuery(WorldPacket& recvPacket)
 
 void WorldSession::HandleGetChannelMemberCount(WorldPacket& recvPacket)
 {
-    if (Skyfire::Chat::Delivery::Control(this, recvPacket, &WorldSession::HandleGetChannelMemberCount,
+    if (!Channel::ServiceEnabled() && Skyfire::Chat::Delivery::Control(this, recvPacket, &WorldSession::HandleGetChannelMemberCount,
         Skyfire::Chat::AudienceKind::ChannelControl, "HandleGetChannelMemberCount")) return;
     std::string channelName;
     recvPacket >> channelName;
@@ -370,7 +370,7 @@ void WorldSession::HandleGetChannelMemberCount(WorldPacket& recvPacket)
 /*
 void WorldSession::HandleSetChannelWatch(WorldPacket& recvPacket)
 {
-    if (Skyfire::Chat::Delivery::Control(this, recvPacket, &WorldSession::HandleSetChannelWatch,
+    if (!Channel::ServiceEnabled() && Skyfire::Chat::Delivery::Control(this, recvPacket, &WorldSession::HandleSetChannelWatch,
         Skyfire::Chat::AudienceKind::ChannelControl, "HandleSetChannelWatch")) return;
     std::string channelName;
     recvPacket >> channelName;

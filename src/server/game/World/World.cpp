@@ -39,6 +39,7 @@
 #include "GroupMgr.h"
 #include "GuildFinderMgr.h"
 #include "GuildMgr.h"
+#include "Guild.h"
 #include "InstanceSaveMgr.h"
 #include "ItemEnchantmentMgr.h"
 #include "Language.h"
@@ -80,6 +81,8 @@ void StartEluna(bool restart);
 #include "World.h"
 #include "Cluster/ChatClient.h"
 #include "ChatDelivery.h"
+#include "RemoteWhisperDelivery.h"
+#include "GuildService.h"
 #include "Platform/MapDataBootstrap.h"
 #include <algorithm>
 #include "WorldPacket.h"
@@ -2157,7 +2160,9 @@ void World::PublishChatPresence()
         if (player && player->IsInWorld())
         {
             if (players.size() > Skyfire::Chat::MaxPresencePlayers) break;
-            players.push_back({entry.second->GetAccountId(), player->GetGUID(), entry.second->GetChatIncarnation(), player->GetName()});
+            players.push_back({entry.second->GetAccountId(), player->GetGUID(), entry.second->GetChatIncarnation(), player->GetName(),
+                player->GetTeam(), std::uint8_t(entry.second->GetSecurity()), true, player->IsVisible(), player->isGMVisible(),
+                entry.second->HasPermission(rbac::RBAC_PERM_TWO_SIDE_INTERACTION_CHANNEL)});
         }
     }
     Skyfire::Chat::PublishPresence(std::move(players));
@@ -2262,6 +2267,26 @@ void World::Update(uint32 diff)
     UpdateSessions(diff);
     RecordTimeDiff("UpdateSessions");
     Skyfire::Chat::Delivery::Update();
+    Skyfire::Chat::RemoteDelivery::Update();
+    Skyfire::Chat::GuildService::Update();
+    for (auto const& result : Skyfire::Chat::TakeServiceResults())
+        if (result.Request.Domain == Skyfire::Chat::ServiceDomain::Channel)
+            Channel::HandleServiceResult(result);
+        else if (result.Request.Domain == Skyfire::Chat::ServiceDomain::Guild)
+            Skyfire::Chat::GuildService::HandleResult(result);
+        else if (result.Request.Domain == Skyfire::Chat::ServiceDomain::Whisper)
+            Skyfire::Chat::RemoteDelivery::Complete(result);
+        else if (result.Request.Domain == Skyfire::Chat::ServiceDomain::Group)
+            Skyfire::Chat::Delivery::CompleteGroup(result);
+    for (auto const& event : Skyfire::Chat::TakeServiceEvents())
+        if (event.Domain == Skyfire::Chat::ServiceDomain::Channel)
+            Channel::HandleServiceEvent(event);
+        else if (event.Domain == Skyfire::Chat::ServiceDomain::Whisper)
+            Skyfire::Chat::RemoteDelivery::Receive(event);
+        else if (event.Domain == Skyfire::Chat::ServiceDomain::Group)
+            Skyfire::Chat::Delivery::ReceiveGroup(event);
+        else if (event.Domain == Skyfire::Chat::ServiceDomain::Guild)
+            Guild::HandleChatEvent(event);
     for (auto const& result : Skyfire::Chat::TakeWhisperResults())
         if (auto* session = FindSession(result.Message.Account)) session->CompleteChatWhisper(result);
     if (Skyfire::Chat::ClientEnabled())

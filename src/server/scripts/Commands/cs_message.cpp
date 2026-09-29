@@ -62,6 +62,18 @@ public:
         if (ChannelMgr* cMgr = ChannelMgr::forTeam(player->GetTeam()))
             channcel = cMgr->GetChannel(channelStr, player);
 
+        if (Channel::ServiceEnabled())
+        {
+            if (strcmp(argStr, "on") && strcmp(argStr, "off")) return false;
+            ChannelMgr* manager = ChannelMgr::forTeam(player->GetTeam());
+            if (!manager) return false;
+            manager->setTeam(player->GetTeam());
+            if (!channcel) channcel = manager->GetJoinChannel(channelStr, 0);
+            if (!channcel) return false;
+            channcel->SetOwnership(player, strcmp(argStr, "on") == 0);
+            return true;
+        }
+
         if (strcmp(argStr, "on") == 0)
         {
             if (channcel)

@@ -8,6 +8,7 @@
 #include "ChannelMgr.h"
 #include "Chat.h"
 #include "ChatDelivery.h"
+#include "RemoteWhisperDelivery.h"
 #include "Cluster/ChatClient.h"
 #include "Common.h"
 #include "DatabaseEnv.h"
@@ -43,6 +44,7 @@ void WorldSession::HandlePlayerWhisper(std::string to, std::string const& msg, L
     }
 
     Player* receiver = sObjectAccessor->FindPlayerByName(to);
+    if (!receiver && !relayed && lang != Language::LANG_ADDON && Skyfire::Chat::RemoteDelivery::Send(sender, to, msg)) return;
     if (relayed && (!receiver || receiver->GetGUID() != expectedReceiver || !receiver->GetSession() ||
         receiver->GetSession()->GetChatIncarnation() != expectedIncarnation))
     { SendPlayerNotFoundNotice(to); return; }
@@ -676,6 +678,7 @@ void WorldSession::HandleAddonMessagechatOpcode(WorldPacket& recvData)
             if (!normalizePlayerName(targetName))
                 break;
             Player* receiver = sObjectAccessor->FindPlayerByName(targetName.c_str());
+            if (!receiver && Skyfire::Chat::RemoteDelivery::Send(sender, targetName, message, prefix)) break;
             if (!receiver)
                 break;
 

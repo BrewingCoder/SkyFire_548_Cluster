@@ -381,6 +381,15 @@ int Master::Run(Skyfire::HubControl::ChildChannel* hubControl)
         SF_LOG_INFO("server.worldserver", "*****************************************************************************");
     }
 
+    bool const socialAuthority = sConfigMgr->GetBoolDefault("Chat.ChannelAuthority.Enable", false) ||
+        sConfigMgr->GetBoolDefault("Chat.GuildAuthority.Enable", false);
+    if (socialAuthority && (!sConfigMgr->GetBoolDefault("ChatService.Enable", false) ||
+        !sConfigMgr->GetBoolDefault("ChatService.Messages", false) || !sConfigMgr->GetBoolDefault("CharacterService.Enable", false)))
+    {
+        SF_LOG_ERROR("server.worldserver", "Chat authority requires ChatService.Enable, ChatService.Messages and CharacterService.Enable.");
+        return 1;
+    }
+
     /// worldserver PID file creation
     std::string pidFile = sConfigMgr->GetStringDefault("PidFile", "");
     if (!pidFile.empty())
@@ -425,7 +434,14 @@ int Master::Run(Skyfire::HubControl::ChildChannel* hubControl)
     }
 
     if (!Skyfire::Chat::StartClient(clusterOptions, clusterError))
+    {
+        if (socialAuthority)
+        {
+            SF_LOG_ERROR("server.worldserver", "Cannot start required chat authority transport: %s", clusterError.c_str());
+            _StopDB(); return 1;
+        }
         SF_LOG_WARN("server.worldserver", "Chat presence disabled: %s", clusterError.c_str());
+    }
 
     ///- Register worldserver's signal handlers
     std::signal(SIGINT, WorldServerSignalHandler);

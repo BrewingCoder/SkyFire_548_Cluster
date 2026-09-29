@@ -20,7 +20,7 @@ namespace Skyfire::Chat
     // changes have an acknowledged commit. Never publish an uncertain mutation.
     struct ChannelState
     {
-        enum class Action { Join, Leave, Kick, Ban, Unban, Password, Announce, Moderator, Mute, Owner, QueryOwner, List, Invite, Speak };
+        enum class Action { Join, Leave, Kick, Ban, Unban, Password, Announce, Moderator, Mute, Owner, QueryOwner, List, Invite, Speak, Ownership };
         enum class Error { None, NotMember, AlreadyMember, Banned, WrongPassword, NotModerator, NotOwner, NotFound, WrongFaction, Muted, Full, Invalid };
         enum Flag : std::uint8_t { OwnerFlag = 1, ModeratorFlag = 2, MutedFlag = 8 };
         struct Member
@@ -82,8 +82,11 @@ namespace Skyfire::Chat
                 {
                     auto old = next->second.Flags;
                     next->second.Flags |= OwnerFlag | ModeratorFlag;
-                    for (auto const& item : Members) notice(0x0c, item.first, guid, old, next->second.Flags);
-                    if (announce) broadcast(0x08, guid);
+                    if (announce)
+                    {
+                        for (auto const& item : Members) notice(0x0c, item.first, guid, old, next->second.Flags);
+                        broadcast(0x08, guid);
+                    }
                 }
             };
             auto remove = [&](std::uint64_t guid, std::uint64_t preferred)
@@ -109,14 +112,20 @@ namespace Skyfire::Chat
                 if (!Constant && Ownership && !Owner) setOwner(command.Actor, Members.size() > 1);
                 return result;
             }
+            if (command.Type == Action::Ownership)
+            {
+                if (!command.Override || Constant) return fail(Error::NotModerator);
+                Ownership = command.Value; result.Durable = true; return result;
+            }
             if (!member) return fail(Error::NotMember);
             if (command.Type == Action::Leave)
             {
                 notice(0x03, command.Actor);
                 // Departure notice goes to remaining members only.
-                bool announce = Announce && !command.Silent;
+                if (Announce && !command.Silent)
+                    for (auto const& item : Members)
+                        if (item.first != command.Actor) notice(0x01, item.first, command.Actor);
                 remove(command.Actor, 0);
-                if (announce) broadcast(0x01, command.Actor);
                 return result;
             }
             if (command.Type == Action::QueryOwner) { notice(0x0b, command.Actor, Owner); return result; }

@@ -3,6 +3,8 @@
 * See LICENSE.md file for Copyright information
 */
 #include "ChatDelivery.h"
+#include "Cluster/ChatGroupRelay.h"
+#include "SocialMgr.h"
 #include "Chat.h"
 #include "CellImpl.h"
 #include "Group.h"
@@ -76,24 +78,63 @@ namespace Skyfire::Chat::Delivery
         bool ignoreOtherGroups, std::uint64_t ignore)
     {
         if (!RoutingEnabled()) return false;
-        std::vector<Player*> recipients;
-        for (GroupReference* member = group->GetFirstMember(); member; member = member->next())
-            if (auto* player = member->GetSource()) recipients.push_back(player);
-        auto groupGuid = group->GetGUID();
-        return Submit(sender, kind, text, language, prefix, packet, recipients,
-            [groupGuid, subgroup, ignoreOtherGroups, ignore, kind, prefix](Player* currentSender, Player* recipient)
+        if (!sender || !sender->IsInWorld() || !sender->GetSession() || !group || !group->IsMember(sender->GetGUID())) return true;
+        if (prefix.empty() && (!sender->CanSpeak() || sender->HasAura(1852))) return true;
+        if (kind == AudienceKind::RaidWarning && (!group->isRaidGroup() || group->isBGGroup() ||
+            !(group->IsLeader(sender->GetGUID()) || group->IsAssistant(sender->GetGUID())))) return true;
+        GroupRelay message; message.Group = group->GetGUID(); message.Sender = sender->GetGUID();
+        message.Incarnation = sender->GetSession()->GetChatIncarnation(); message.Name = sender->GetName();
+        message.Kind = kind; message.Language = language; message.Text = text; message.Prefix = prefix;
+        message.Subgroup = subgroup < 0 ? 255 : std::uint8_t(subgroup); message.Ignore = ignore; message.IgnoreOtherGroups = ignoreOtherGroups;
+        message.ChatTag = sender->GetChatTag(); message.GM = sender->GetSession()->HasPermission(rbac::RBAC_PERM_COMMAND_GM_CHAT);
+        for (auto const& member : group->GetMemberSlots()) message.Members.push_back(member.guid);
+        ServiceRequest request; request.Domain = ServiceDomain::Group; request.Account = sender->GetSession()->GetAccountId();
+        request.Actor = message.Sender; request.Incarnation = message.Incarnation; request.Payload = EncodeGroupRelay(message).Bytes;
+        GroupRelay validated;
+        if (!DecodeGroupRelay(request.Payload, validated) || !QueueServiceRequest(std::move(request)))
+            sender->GetSession()->SendNotification("Chat service unavailable or busy. Group message was not sent.");
+        return true;
+    }
+    void CompleteGroup(ServiceResult const& result)
+    {
+        if (result.Success && result.Response.Status == ServiceStatus::Ok) return;
+        auto* sender = ObjectAccessor::FindPlayer(result.Request.Actor);
+        if (sender && sender->IsInWorld() && sender->GetSession() && sender->GetSession()->GetAccountId() == result.Request.Account &&
+            sender->GetSession()->GetChatIncarnation() == result.Request.Incarnation)
+            sender->GetSession()->SendNotification("Chat service unavailable or request expired. Group message delivery was not confirmed.");
+    }
+    void ReceiveGroup(ServiceEvent const& event)
+    {
+        GroupRelay message; if (!DecodeGroupRelay(event.Payload, message)) return;
+        auto* recipient = ObjectAccessor::FindPlayer(event.Recipient);
+        if (!recipient || !recipient->IsInWorld() || !recipient->GetSession() ||
+            recipient->GetSession()->GetChatIncarnation() != event.Incarnation || recipient->GetGUID() == message.Ignore) return;
+        Group* group = recipient->GetGroup();
+        if (!group || group->GetGUID() != message.Group) group = recipient->GetOriginalGroup();
+        if (!group || group->GetGUID() != message.Group || !group->IsMember(message.Sender) || !group->IsMember(recipient->GetGUID()) ||
+            (message.IgnoreOtherGroups && recipient->GetGroup() != group) ||
+            (message.Subgroup != 255 && (group->GetMemberGroup(message.Sender) != message.Subgroup || group->GetMemberGroup(recipient->GetGUID()) != message.Subgroup)) ||
+            (!message.Prefix.empty() && !recipient->GetSession()->IsAddonRegistered(message.Prefix))) return;
+        if (auto* sender = ObjectAccessor::FindPlayer(message.Sender))
+            if (!sender->IsInWorld() || !sender->GetSession() || sender->GetSession()->GetChatIncarnation() != message.Incarnation ||
+                (message.Prefix.empty() && (!sender->CanSpeak() || sender->HasAura(1852)))) return;
+        bool leader = group->IsLeader(message.Sender);
+        bool addon = message.Language == std::uint32_t(Language::LANG_ADDON);
+        ChatMsg type;
+        switch (message.Kind)
         {
-            Group* current = currentSender->GetGroup();
-            if (!current || current->GetGUID() != groupGuid) current = currentSender->GetOriginalGroup();
-            if (!current || current->GetGUID() != groupGuid || !current->IsMember(currentSender->GetGUID()) || !current->IsMember(recipient->GetGUID()) ||
-                recipient->GetGUID() == ignore || (ignoreOtherGroups && recipient->GetGroup() != current) ||
-                (subgroup != -1 && (current->GetMemberGroup(recipient->GetGUID()) != subgroup ||
-                    current->GetMemberGroup(currentSender->GetGUID()) != subgroup))) return false;
-            if (kind == AudienceKind::RaidWarning &&
-                (!current->isRaidGroup() || current->isBGGroup() ||
-                 !(current->IsLeader(currentSender->GetGUID()) || current->IsAssistant(currentSender->GetGUID())))) return false;
-            return prefix.empty() || recipient->GetSession()->IsAddonRegistered(prefix);
-        });
+            case AudienceKind::Party: type = leader && !addon ? ChatMsg::CHAT_MSG_PARTY_LEADER : ChatMsg::CHAT_MSG_PARTY; break;
+            case AudienceKind::Raid: if (!addon && !group->isRaidGroup()) return; type = leader && !addon ? ChatMsg::CHAT_MSG_RAID_LEADER : ChatMsg::CHAT_MSG_RAID; break;
+            case AudienceKind::RaidWarning:
+                if (!group->isRaidGroup() || group->isBGGroup() || (!leader && !group->IsAssistant(message.Sender))) return;
+                type = ChatMsg::CHAT_MSG_RAID_WARNING; break;
+            case AudienceKind::Instance: if (!group->isBGGroup()) return; type = leader && !addon ? ChatMsg::CHAT_MSG_INSTANCE_LEADER : ChatMsg::CHAT_MSG_INSTANCE; break;
+            default: return;
+        }
+        WorldPacket packet;
+        ChatHandler::BuildChatPacket(packet, type, Language(message.Language), ObjectGuid(message.Sender), ObjectGuid(0),
+            message.Text, message.ChatTag, message.Name, "", 0, message.GM, "", message.Prefix);
+        recipient->GetSession()->SendPacket(&packet);
     }
     bool SpatialMessage(Player* sender, WorldPacket const& packet, std::string const& text,
         std::uint32_t language, float range, bool ownTeamOnly)

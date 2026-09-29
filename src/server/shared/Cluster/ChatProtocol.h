@@ -15,7 +15,9 @@ namespace Skyfire::Chat
     // Operation 2 carries bounded presence snapshots; see ChatPresence.h.
     // Operation 3 relays bounded whispers; see ChatWhisper.h.
     // Operation 4 routes an authority-projected audience; see ChatRouting.h.
-    // Client opcodes, commands and database mutations are not accepted.
+    // Operation 5 dispatches typed, authenticated social-service requests.
+    // Operation 6 polls acknowledged, incarnation-bound service events.
+    // Raw client opcodes and SQL statements are never accepted.
     constexpr std::size_t ProbeSize = 16;
     inline bool DecodeProbe(std::array<std::uint8_t, ProbeSize> const& bytes, std::uint32_t& id, std::uint32_t& realm)
     {

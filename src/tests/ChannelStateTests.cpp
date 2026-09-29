@@ -3,15 +3,37 @@
 * See LICENSE.md file for Copyright information
 */
 #include "ChannelState.h"
+#include "Cluster/ChatChannels.h"
 #include <stdexcept>
 #include <utility>
 
 int main()
 {
+    auto check = [](bool passed) { if (!passed) throw std::runtime_error("Channel policy invariant failed"); };
+    {
+        Skyfire::Chat::ChannelCommand request;
+        request.Name = "General"; request.Password = "test";
+        request.Team = 469; request.ActorTeam = 469;
+        auto bytes = Skyfire::Chat::EncodeChannelCommand(request).Bytes;
+        Skyfire::Chat::ChannelCommand decoded;
+        check(Skyfire::Chat::DecodeChannelCommand(bytes, decoded));
+        check(decoded.Name == request.Name && decoded.Password == request.Password);
+        bytes.push_back(0);
+        check(!Skyfire::Chat::DecodeChannelCommand(bytes, decoded));
+        request.Name.assign(128, 'x');
+        check(!Skyfire::Chat::DecodeChannelCommand(Skyfire::Chat::EncodeChannelCommand(request).Bytes, decoded));
+        Skyfire::Chat::ChannelUpdate update, result;
+        update.Name = "General"; update.Revision = 1; update.Members.push_back({1, 7, 3});
+        update.Notices.push_back({2, 0, 0, 1, 0});
+        check(Skyfire::Chat::DecodeChannelUpdate(Skyfire::Chat::EncodeChannelUpdate(update).Bytes, result));
+        check(result.Members.size() == 1 && result.Members[0].Incarnation == 7);
+        update.Members.push_back({1, 8, 0});
+        check(!Skyfire::Chat::DecodeChannelUpdate(Skyfire::Chat::EncodeChannelUpdate(update).Bytes, result));
+    }
+
     using State = Skyfire::Chat::ChannelState;
     using Action = State::Action;
     using Error = State::Error;
-    auto check = [](bool passed) { if (!passed) throw std::runtime_error("Channel policy invariant failed"); };
     auto command = [](Action action, std::uint64_t actor = 1, std::uint64_t target = 0)
     {
         State::Command result;
@@ -20,7 +42,9 @@ int main()
         return result;
     };
     State channel;
-    check(channel.Apply(command(Action::Join)).Status == Error::None);
+    auto firstJoin = channel.Apply(command(Action::Join));
+    check(firstJoin.Status == Error::None && firstJoin.Notices.size() == 1);
+    check(firstJoin.Notices.front().Type == 0x02); // No spurious first-owner mode notice.
     check(channel.Owner == 1 && (channel.Members.at(1).Flags & State::ModeratorFlag));
     check(channel.Apply(command(Action::Join, 2)).Status == Error::None);
     check(channel.Apply(command(Action::Ban, 2, 1)).Status == Error::NotModerator);
@@ -50,7 +74,10 @@ int main()
     check(channel.Apply(command(Action::Join, 2)).Status == Error::WrongPassword);
     auto join = command(Action::Join, 2); join.PasswordMatches = true;
     check(channel.Apply(join).Status == Error::None);
-    check(channel.Apply(command(Action::Leave)).Status == Error::None && channel.Owner == 2);
+    auto departed = channel.Apply(command(Action::Leave));
+    check(departed.Status == Error::None && channel.Owner == 2);
+    check(departed.Notices.size() >= 3 && departed.Notices[0].Type == 0x03 && departed.Notices[1].Type == 0x01);
+    // Other members see the departure before the replacement-owner notices.
     check(channel.Apply(command(Action::Kick, 2, 2)).Status == Error::None);
     check(channel.Owner == 0 && channel.Members.empty());
     State otherRealm;

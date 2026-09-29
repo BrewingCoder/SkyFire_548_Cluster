@@ -10,6 +10,10 @@
 #include "Config.h"
 #include "DatabaseEnv.h"
 #include "Guild.h"
+#include "GuildService.h"
+#include <memory>
+#include <cstdlib>
+#include "Cluster/GuildEvents.h"
 #include "GuildFinderMgr.h"
 #include "GuildMgr.h"
 #include "Language.h"
@@ -628,6 +632,80 @@ void Guild::Member::SetStats(uint32 virtualRealmID, std::string const& name, uin
     m_totalReputation = reputation;
 }
 
+namespace
+{
+    thread_local bool ApplyingGuildProjection = false;
+    struct GuildProjectionScope
+    {
+        GuildProjectionScope() { ApplyingGuildProjection = true; }
+        ~GuildProjectionScope() { ApplyingGuildProjection = false; }
+    };
+}
+
+void Guild::Member::ApplyChatSocial(uint8 rank, std::string const& publicNote, std::string const& officerNote)
+{
+    m_rankId = rank; m_publicNote = publicNote; m_officerNote = officerNote;
+    if (Player* player = FindPlayer()) player->SetRank(rank);
+}
+
+bool Guild::ApplyCreateProjection(Skyfire::Chat::GuildState const& state)
+{
+    if (m_id || !state.Valid()) return false;
+    m_id = state.Id; m_createdDate = ::time(NULL); _CreateLogHolders();
+    for (size_t i = 0; i < state.Ranks.size(); ++i)
+        m_ranks.emplace_back(m_id, uint8(i), state.Ranks[i].Name, state.Ranks[i].Rights, 0);
+    if (!ApplyChatProjection(state)) return false;
+    _BroadcastEvent(GE_FOUNDER, 0);
+    sScriptMgr->OnGuildCreate(this, ObjectAccessor::FindPlayer(state.Leader), state.Name);
+    return true;
+}
+
+bool Guild::ApplyChatProjection(Skyfire::Chat::GuildState const& state, uint8 removedRank)
+{
+    if (!state.Valid() || state.Id != m_id) return false;
+    if (state.Ranks.size() == m_ranks.size() + 1)
+        m_ranks.emplace_back(m_id, uint8(m_ranks.size()), state.Ranks.back().Name, state.Ranks.back().Rights, 0);
+    else if (state.Ranks.size() + 1 == m_ranks.size() && removedRank > 0 && removedRank < m_ranks.size())
+    {
+        m_ranks.erase(m_ranks.begin() + removedRank);
+        for (size_t i = 0; i < m_ranks.size(); ++i) m_ranks[i].ReindexChatRank(uint8(i));
+    }
+    else if (state.Ranks.size() != m_ranks.size()) return false;
+    GuildProjectionScope scope;
+    m_name = state.Name; m_motd = state.Motd; m_info = state.Info; m_leaderGuid = state.Leader;
+    for (size_t i = 0; i < state.Ranks.size(); ++i) m_ranks[i].ApplyChatSocial(state.Ranks[i].Name, state.Ranks[i].Rights);
+    std::vector<uint64> removed;
+    for (auto const& entry : m_members) if (!state.Members.count(entry.second->GetGUID())) removed.push_back(entry.second->GetGUID());
+    for (uint64 guid : removed)
+    {
+        sCalendarMgr->RemovePlayerGuildEventsAndSignups(guid, m_id);
+        DeleteMember(guid, true, false, false);
+    }
+    for (auto const& entry : state.Members)
+    {
+        if (!GetMember(entry.first) && !AddMember(entry.first, entry.second.RankId)) return false;
+        GetMember(entry.first)->ApplyChatSocial(entry.second.RankId, entry.second.PublicNote, entry.second.OfficerNote);
+    }
+    _UpdateAccountsNumber();
+    return true;
+}
+
+void Guild::ApplyDisbandProjection()
+{
+    GuildProjectionScope scope;
+    sScriptMgr->OnGuildDisband(this);
+    _BroadcastEvent(GE_DISBANDED, 0);
+    while (!m_members.empty())
+    {
+        auto guid = m_members.begin()->second->GetGUID();
+        sCalendarMgr->RemovePlayerGuildEventsAndSignups(guid, m_id);
+        DeleteMember(guid, true, false, false);
+    }
+    SQLTransaction empty(nullptr); _DeleteBankItems(empty, false);
+    sGuildFinderMgr->ForgetGuild(m_id);
+    sGuildMgr->RemoveGuild(m_id);
+}
+
 void Guild::Member::SetPublicNote(std::string const& publicNote)
 {
     if (m_publicNote == publicNote)
@@ -1178,6 +1256,7 @@ Guild::~Guild()
 // Creates new guild with default data and saves it to database.
 bool Guild::Create(Player* pLeader, std::string const& name)
 {
+    if (Skyfire::Chat::GuildService::Enabled()) return false;
     // Check if guild with such name already exists
     if (sGuildMgr->GetGuildByName(name))
         return false;
@@ -1239,6 +1318,8 @@ bool Guild::Create(Player* pLeader, std::string const& name)
 // Disbands guild and deletes all related data from database
 void Guild::Disband()
 {
+    if (Skyfire::Chat::GuildService::Enabled() && !ApplyingGuildProjection)
+    { Skyfire::Chat::GuildService::Admin(nullptr, Skyfire::Chat::GuildAdmin::Delete, m_id, 0, 0, ""); return; }
     // Call scripts before guild data removed from database
     sScriptMgr->OnGuildDisband(this);
 
@@ -1341,6 +1422,7 @@ void Guild::OnPlayerStatusChange(Player* player, uint32 flag, bool state)
 
 bool Guild::SetName(std::string const& name)
 {
+    if (Skyfire::Chat::GuildService::Enabled()) return Skyfire::Chat::GuildService::Admin(nullptr, Skyfire::Chat::GuildAdmin::Rename, m_id, 0, 0, name);
     if (m_name == name || name.empty() || name.length() > 24 || sObjectMgr->IsReservedName(name) || !ObjectMgr::IsValidCharterName(name))
         return false;
 
@@ -1366,88 +1448,101 @@ bool Guild::SetName(std::string const& name)
 
 void Guild::HandleRoster(WorldSession* session /*= NULL*/)
 {
-    ByteBuffer memberData(100);
-    // Guess size
-
-    WorldPacket data(SMSG_GUILD_ROSTER, 100);
-
-    data.WriteBits(m_members.size(), 17);
-    data.WriteBits(m_motd.length(), 10);
-
-    for (Members::const_iterator itr = m_members.begin(); itr != m_members.end(); ++itr)
+    auto build = [this](bool officerNotes)
     {
-        Member* member = itr->second;
-        size_t pubNoteLength = member->GetPublicNote().length();
-        size_t offNoteLength = member->GetOfficerNote().length();
+        ByteBuffer memberData(100);
+        // Guess size
 
-        ObjectGuid guid = member->GetGUID();
-        data.WriteBits(offNoteLength, 8);
-        data.WriteBit(guid[5]);
-        data.WriteBit(0); // Can Scroll of Ressurect
-        data.WriteBits(pubNoteLength, 8);
-        data.WriteBit(guid[7]);
-        data.WriteBit(guid[0]);
-        data.WriteBit(guid[6]);
-        data.WriteBits(member->GetName().length(), 6);
-        data.WriteBit(0); // Has Authenticator
-        data.WriteBit(guid[3]);
-        data.WriteBit(guid[4]);
-        data.WriteBit(guid[1]);
-        data.WriteBit(guid[2]);
+        WorldPacket data(SMSG_GUILD_ROSTER, 100);
 
-        memberData << uint8(member->GetClass());
-        memberData << uint32(member->GetTotalReputation());
-        memberData.WriteString(member->GetName());
-        memberData.WriteByteSeq(guid[0]);
+        data.WriteBits(m_members.size(), 17);
+        data.WriteBits(m_motd.length(), 10);
 
-        // for (2 professions)
-        memberData << uint32(0) << uint32(0) << uint32(0);
-        memberData << uint32(0) << uint32(0) << uint32(0);
+        for (Members::const_iterator itr = m_members.begin(); itr != m_members.end(); ++itr)
+        {
+            Member* member = itr->second;
+            size_t pubNoteLength = member->GetPublicNote().length();
+            std::string const officerNote = officerNotes ? member->GetOfficerNote() : std::string();
+            size_t offNoteLength = officerNote.length();
 
-        memberData << uint8(member->GetLevel());
-        memberData << uint8(member->GetFlags());
-        memberData << uint32(member->GetZoneId());
-        memberData << uint32(sWorld->getIntConfig(WorldIntConfigs::CONFIG_GUILD_WEEKLY_REP_CAP) - member->GetWeekReputation());
-        memberData.WriteByteSeq(guid[3]);
-        memberData << uint64(member->GetTotalActivity());
-        memberData.WriteString(member->GetOfficerNote());
-        memberData << float(member->IsOnline() ? 0.0f : float(::time(NULL) - member->GetLogoutTime()) / float(DAY));
-        memberData << uint8(0);        // Gender
-        memberData << uint32(member->GetRankId());
-        memberData << uint32(member->GetVirtualRealm());
-        memberData.WriteByteSeq(guid[5]);
-        memberData.WriteByteSeq(guid[7]);
-        memberData.WriteString(member->GetPublicNote());
-        memberData.WriteByteSeq(guid[4]);
-        memberData << uint64(member->GetWeekActivity());
-        memberData << uint32(member->GetAchievementPoints());
-        memberData.WriteByteSeq(guid[6]);
-        memberData.WriteByteSeq(guid[1]);
-        memberData.WriteByteSeq(guid[2]);
-    }
+            ObjectGuid guid = member->GetGUID();
+            data.WriteBits(offNoteLength, 8);
+            data.WriteBit(guid[5]);
+            data.WriteBit(0); // Can Scroll of Ressurect
+            data.WriteBits(pubNoteLength, 8);
+            data.WriteBit(guid[7]);
+            data.WriteBit(guid[0]);
+            data.WriteBit(guid[6]);
+            data.WriteBits(member->GetName().length(), 6);
+            data.WriteBit(0); // Has Authenticator
+            data.WriteBit(guid[3]);
+            data.WriteBit(guid[4]);
+            data.WriteBit(guid[1]);
+            data.WriteBit(guid[2]);
 
-    data.WriteBits(m_info.length(), 11);
+            memberData << uint8(member->GetClass());
+            memberData << uint32(member->GetTotalReputation());
+            memberData.WriteString(member->GetName());
+            memberData.WriteByteSeq(guid[0]);
 
-    data.FlushBits();
-    data.append(memberData);
+            // for (2 professions)
+            memberData << uint32(0) << uint32(0) << uint32(0);
+            memberData << uint32(0) << uint32(0) << uint32(0);
 
-    data << uint32(m_accountsNumber);
-    data.AppendPackedTime(m_createdDate);
-    data.WriteString(m_info);
-    data << uint32(sWorld->getIntConfig(WorldIntConfigs::CONFIG_GUILD_WEEKLY_REP_CAP));
-    data.WriteString(m_motd);
-    data << uint32(0);
+            memberData << uint8(member->GetLevel());
+            memberData << uint8(member->GetFlags());
+            memberData << uint32(member->GetZoneId());
+            memberData << uint32(sWorld->getIntConfig(WorldIntConfigs::CONFIG_GUILD_WEEKLY_REP_CAP) - member->GetWeekReputation());
+            memberData.WriteByteSeq(guid[3]);
+            memberData << uint64(member->GetTotalActivity());
+            memberData.WriteString(officerNote);
+            memberData << float(member->IsOnline() ? 0.0f : float(::time(NULL) - member->GetLogoutTime()) / float(DAY));
+            memberData << uint8(0);        // Gender
+            memberData << uint32(member->GetRankId());
+            memberData << uint32(member->GetVirtualRealm());
+            memberData.WriteByteSeq(guid[5]);
+            memberData.WriteByteSeq(guid[7]);
+            memberData.WriteString(member->GetPublicNote());
+            memberData.WriteByteSeq(guid[4]);
+            memberData << uint64(member->GetWeekActivity());
+            memberData << uint32(member->GetAchievementPoints());
+            memberData.WriteByteSeq(guid[6]);
+            memberData.WriteByteSeq(guid[1]);
+            memberData.WriteByteSeq(guid[2]);
+        }
 
+        data.WriteBits(m_info.length(), 11);
+
+        data.FlushBits();
+        data.append(memberData);
+
+        data << uint32(m_accountsNumber);
+        data.AppendPackedTime(m_createdDate);
+        data.WriteString(m_info);
+        data << uint32(sWorld->getIntConfig(WorldIntConfigs::CONFIG_GUILD_WEEKLY_REP_CAP));
+        data.WriteString(m_motd);
+        data << uint32(0);
+
+        return data;
+    };
     if (session)
     {
-        SF_LOG_DEBUG("guild", "SMSG_GUILD_ROSTER [%s]", session->GetPlayerInfo().c_str());
+        if (!session->GetPlayer() || !IsMember(session->GetPlayer()->GetGUID())) return;
+        auto data = build(_HasRankRight(session->GetPlayer(), GR_RIGHT_VIEWOFFNOTE));
         session->SendPacket(&data);
+        return;
     }
-    else
-    {
-        SF_LOG_DEBUG("guild", "SMSG_GUILD_ROSTER [Broadcast]");
-        BroadcastPacket(&data);
-    }
+    // At most two encodings, so private officer notes never enter a member's
+    // packet and broadcasting remains linear in roster size.
+    std::unique_ptr<WorldPacket> packets[2];
+    for (auto const& entry : m_members)
+        if (auto* player = entry.second->FindPlayer())
+            if (auto* current = player->GetSession())
+            {
+                unsigned visibility = _HasRankRight(player, GR_RIGHT_VIEWOFFNOTE) ? 1 : 0;
+                if (!packets[visibility]) packets[visibility] = std::make_unique<WorldPacket>(build(visibility != 0));
+                current->SendPacket(packets[visibility].get());
+            }
 }
 
 void Guild::HandleQuery(WorldSession* session)
@@ -1567,6 +1662,9 @@ void Guild::SendGuildRankInfo(WorldSession* session) const
 
 void Guild::HandleSetMOTD(WorldSession* session, std::string const& motd)
 {
+    Skyfire::Chat::GuildState::Command request; request.Type = Skyfire::Chat::GuildState::Action::Motd; request.Text = motd;
+    if (Skyfire::Chat::GuildService::Submit(session, m_id, std::move(request), [motd](Guild* guild, WorldSession*)
+        { sScriptMgr->OnGuildMOTDChanged(guild, motd); guild->_BroadcastEvent(GE_MOTD, 0, motd.c_str()); })) return;
     if (m_motd == motd)
         return;
 
@@ -1590,6 +1688,9 @@ void Guild::HandleSetMOTD(WorldSession* session, std::string const& motd)
 
 void Guild::HandleSetInfo(WorldSession* session, std::string const& info)
 {
+    Skyfire::Chat::GuildState::Command request; request.Type = Skyfire::Chat::GuildState::Action::Info; request.Text = info;
+    if (Skyfire::Chat::GuildService::Submit(session, m_id, std::move(request), [info](Guild* guild, WorldSession*)
+        { sScriptMgr->OnGuildInfoChanged(guild, info); })) return;
     if (m_info == info)
         return;
 
@@ -1703,6 +1804,14 @@ void Guild::_SendRemovePlayerFromGuild(ObjectGuid removedGuid, std::string const
 
 void Guild::HandleSetNewGuildMaster(WorldSession* session, std::string const& name)
 {
+    if (Skyfire::Chat::GuildService::Enabled())
+    {
+        Member* target = GetMember(name);
+        if (!target) return;
+        Skyfire::Chat::GuildState::Command request; request.Type = Skyfire::Chat::GuildState::Action::Leader; request.Target = target->GetGUID();
+        Skyfire::Chat::GuildService::Submit(session, m_id, std::move(request), [](Guild* guild, WorldSession*) { guild->HandleRoster(); });
+        return;
+    }
     Player* player = session->GetPlayer();
     // Only the guild master can throne a new guild master
     if (!_IsLeader(player))
@@ -1722,6 +1831,15 @@ void Guild::HandleSetNewGuildMaster(WorldSession* session, std::string const& na
 
 void Guild::HandleReplaceGuildMaster(WorldSession* session)
 {
+    if (Skyfire::Chat::GuildService::Enabled())
+    {
+        auto* oldLeader = GetMember(m_leaderGuid);
+        if (!oldLeader || oldLeader->IsOnline() || oldLeader->GetLogoutTime() > uint64(time(NULL) - (DAY * 90)))
+        { SendCommandResult(session, GUILD_COMMAND_CHANGE_LEADER, ERR_GUILD_PERMISSIONS); return; }
+        Skyfire::Chat::GuildState::Command request; request.Type = Skyfire::Chat::GuildState::Action::ClaimLeader;
+        Skyfire::Chat::GuildService::Submit(session, m_id, std::move(request), [](Guild* guild, WorldSession*) { guild->HandleRoster(); });
+        return;
+    }
     Player* player = session->GetPlayer();
 
     if (Member* newGuildMaster = GetMember(player->GetGUID()))
@@ -1749,6 +1867,7 @@ void Guild::HandleReplaceGuildMaster(WorldSession* session)
 
 void Guild::HandleSetBankTabInfo(WorldSession* session, uint8 tabId, std::string const& name, std::string const& icon)
 {
+    if (Skyfire::Chat::GuildService::Blocked(m_id)) return;
     BankTab* tab = GetBankTab(tabId);
     if (!tab)
     {
@@ -1780,6 +1899,11 @@ void Guild::HandleSetBankTabInfo(WorldSession* session, uint8 tabId, std::string
 
 void Guild::HandleSetMemberNote(WorldSession* session, std::string const& note, uint64 guid, bool isPublic)
 {
+    Skyfire::Chat::GuildState::Command request;
+    request.Type = isPublic ? Skyfire::Chat::GuildState::Action::PublicNote : Skyfire::Chat::GuildState::Action::OfficerNote;
+    request.Target = guid; request.Text = note;
+    if (Skyfire::Chat::GuildService::Submit(session, m_id, std::move(request), [](Guild* guild, WorldSession* current)
+        { guild->HandleRoster(current); })) return;
     // Player must have rights to set public/officer note
     if (session && !_HasRankRight(session->GetPlayer(), isPublic ? GR_RIGHT_EPNOTE : GR_RIGHT_EOFFNOTE))
     {
@@ -1833,6 +1957,17 @@ void Guild::HandleSetMemberNote(WorldSession* session, std::string const& note, 
 
 void Guild::HandleSetRankInfo(WorldSession* session, uint8 rankId, std::string const& name, uint32 rights, uint32 moneyPerDay, const GuildBankRightsAndSlotsVec& rightsAndSlots)
 {
+    Skyfire::Chat::GuildState::Command request; request.Type = Skyfire::Chat::GuildState::Action::EditRank;
+    request.RankId = rankId; request.Text = name; request.Rights = rights;
+    Skyfire::Chat::GuildRequest::BankPermissions bank; bank.Money = moneyPerDay;
+    for (auto const& setting : rightsAndSlots) if (setting.GetTabId() < bank.Tabs.size())
+        bank.Tabs[setting.GetTabId()] = {uint8(setting.GetRights()), uint32(setting.GetSlots())};
+    if (Skyfire::Chat::GuildService::Submit(session, m_id, std::move(request), [rankId, moneyPerDay, rightsAndSlots](Guild* guild, WorldSession*)
+        {
+            if (auto* rank = guild->GetRankInfo(rankId)) rank->ApplyChatBankMoney(moneyPerDay);
+            for (auto const& setting : rightsAndSlots) guild->_SetRankBankTabRightsAndSlots(rankId, setting, false);
+            guild->HandleRoster();
+        }, bank)) return;
     // Only leader can modify ranks
     if (!_IsLeader(session->GetPlayer()))
         SendCommandResult(session, GUILD_COMMAND_CHANGE_RANK, ERR_GUILD_PERMISSIONS);
@@ -1855,6 +1990,7 @@ void Guild::HandleSetRankInfo(WorldSession* session, uint8 rankId, std::string c
 
 void Guild::HandleBuyBankTab(WorldSession* session, uint8 tabId)
 {
+    if (Skyfire::Chat::GuildService::Blocked(m_id)) return;
     Player* player = session->GetPlayer();
     if (!player)
         return;
@@ -1893,6 +2029,12 @@ void Guild::HandleBuyBankTab(WorldSession* session, uint8 tabId)
 
 void Guild::HandleInviteMember(WorldSession* session, std::string const& name)
 {
+    if (Skyfire::Chat::GuildService::Enabled())
+    {
+        Skyfire::Chat::GuildState::Command command; command.Type = Skyfire::Chat::GuildState::Action::Invite; command.Text = name;
+        Skyfire::Chat::GuildService::Submit(session,m_id,std::move(command)); return;
+    }
+
     Player* pInvitee = sObjectAccessor->FindPlayerByName(name);
     if (!pInvitee)
     {
@@ -1932,6 +2074,15 @@ void Guild::HandleInviteMember(WorldSession* session, std::string const& name)
         return;
     }
 
+    if (Skyfire::Chat::GuildService::Enabled() && !Skyfire::Chat::GuildService::Applying())
+    {
+        Skyfire::Chat::GuildState::Command request; request.Type = Skyfire::Chat::GuildState::Action::Invite;
+        request.Target = pInvitee->GetGUID(); request.TargetIncarnation = pInvitee->GetSession()->GetChatIncarnation();
+        Skyfire::Chat::GuildService::Submit(session, m_id, std::move(request), [name](Guild* guild, WorldSession* current)
+            { guild->HandleInviteMember(current, name); });
+        return;
+    }
+
     SendCommandResult(session, GUILD_COMMAND_INVITE, ERR_GUILD_COMMAND_SUCCESS, name);
 
     SF_LOG_DEBUG("guild", "Player %s invited %s to join his Guild", player->GetName().c_str(), name.c_str());
@@ -1948,6 +2099,11 @@ void Guild::HandleInviteMember(WorldSession* session, std::string const& name)
 
     _LogEvent(GUILD_EVENT_LOG_INVITE_PLAYER, player->GetGUIDLow(), pInvitee->GetGUIDLow());
 
+    SendInvitationPacket(pInvitee, player->GetName());
+}
+
+void Guild::SendInvitationPacket(Player* pInvitee, std::string const& inviterName)
+{
     ObjectGuid oldGuildGuid = MAKE_NEW_GUID(pInvitee->GetGuildId(), 0, pInvitee->GetGuildId() ? uint32(HIGHGUID_GUILD) : 0);
     ObjectGuid newGuildGuid = GetGUID();
 
@@ -1964,7 +2120,7 @@ void Guild::HandleInviteMember(WorldSession* session, std::string const& name)
     data.WriteBit(oldGuildGuid[3]);
     data.WriteBit(newGuildGuid[5]);
     data.WriteBit(oldGuildGuid[6]);
-    data.WriteBits(player->GetName().length(), 6);
+    data.WriteBits(inviterName.length(), 6);
     data.WriteBit(newGuildGuid[1]);
     data.WriteBit(newGuildGuid[3]);
     data.WriteBit(oldGuildGuid[0]);
@@ -1977,7 +2133,7 @@ void Guild::HandleInviteMember(WorldSession* session, std::string const& name)
     data.WriteByteSeq(newGuildGuid[1]);
     data << uint32(m_emblemInfo.GetBackgroundColor());
     data.WriteByteSeq(newGuildGuid[4]);
-    data.WriteString(player->GetName());
+    data.WriteString(inviterName);
     data << uint32(m_emblemInfo.GetBorderStyle());
     data.WriteByteSeq(oldGuildGuid[7]);
     data.WriteByteSeq(newGuildGuid[0]);
@@ -2009,6 +2165,10 @@ void Guild::HandleInviteMember(WorldSession* session, std::string const& name)
 
 void Guild::HandleAcceptMember(WorldSession* session)
 {
+    if (!session->GetPlayer() || session->GetPlayer()->GetGuildIdInvited() != m_id || session->GetPlayer()->GetGuildId()) return;
+    Skyfire::Chat::GuildState::Command request; request.Type = Skyfire::Chat::GuildState::Action::Accept; request.Target = 0;
+    if (Skyfire::Chat::GuildService::Submit(session, m_id, std::move(request), [](Guild* guild, WorldSession*)
+        { guild->HandleRoster(); })) return;
     Player* player = session->GetPlayer();
     if (!sWorld->GetBoolConfig(WorldBoolConfigs::CONFIG_ALLOW_TWO_SIDE_INTERACTION_GUILD) &&
         player->GetTeam() != sObjectMgr->GetPlayerTeamByGUID(GetLeaderGUID()))
@@ -2019,6 +2179,12 @@ void Guild::HandleAcceptMember(WorldSession* session)
 
 void Guild::HandleLeaveMember(WorldSession* session)
 {
+    if (Skyfire::Chat::GuildService::Enabled() && _IsLeader(session->GetPlayer()) && m_members.size() == 1 &&
+        GetLevel() >= sWorld->getIntConfig(WorldIntConfigs::CONFIG_GUILD_UNDELETABLE_LEVEL))
+    { SendCommandResult(session, GUILD_COMMAND_QUIT, ERR_GUILD_UNDELETABLE_DUE_TO_LEVEL); return; }
+    Skyfire::Chat::GuildState::Command request; request.Type = Skyfire::Chat::GuildState::Action::Leave; request.Target = 0;
+    if (Skyfire::Chat::GuildService::Submit(session, m_id, std::move(request), [](Guild* guild, WorldSession*)
+        { guild->HandleRoster(); })) return;
     Player* player = session->GetPlayer();
     bool disband = false;
 
@@ -2053,6 +2219,9 @@ void Guild::HandleLeaveMember(WorldSession* session)
 
 void Guild::HandleRemoveMember(WorldSession* session, uint64 guid)
 {
+    Skyfire::Chat::GuildState::Command request; request.Type = Skyfire::Chat::GuildState::Action::Remove; request.Target = guid;
+    if (Skyfire::Chat::GuildService::Submit(session, m_id, std::move(request), [](Guild* guild, WorldSession*)
+        { guild->HandleRoster(); })) return;
     Player* player = session->GetPlayer();
 
     // Player must have rights to remove members
@@ -2084,6 +2253,10 @@ void Guild::HandleRemoveMember(WorldSession* session, uint64 guid)
 
 void Guild::HandleUpdateMemberRank(WorldSession* session, uint64 guid, bool demote)
 {
+    Skyfire::Chat::GuildState::Command request;
+    request.Type = demote ? Skyfire::Chat::GuildState::Action::Demote : Skyfire::Chat::GuildState::Action::Promote; request.Target = guid;
+    if (Skyfire::Chat::GuildService::Submit(session, m_id, std::move(request), [](Guild* guild, WorldSession*)
+        { guild->HandleRoster(); })) return;
     Player* player = session->GetPlayer();
     GuildCommandType type = demote ? GUILD_COMMAND_DEMOTE : GUILD_COMMAND_PROMOTE;
     // Player must have rights to promote
@@ -2137,6 +2310,10 @@ void Guild::HandleUpdateMemberRank(WorldSession* session, uint64 guid, bool demo
 
 void Guild::HandleSetMemberRank(WorldSession* session, uint64 targetGuid, uint64 setterGuid, uint32 rank)
 {
+    Skyfire::Chat::GuildState::Command request;
+    request.Type = Skyfire::Chat::GuildState::Action::SetRank; request.Target = targetGuid; request.RankId = rank;
+    if (Skyfire::Chat::GuildService::Submit(session, m_id, std::move(request), [](Guild* guild, WorldSession*)
+        { guild->HandleRoster(); })) return;
     Player* player = session->GetPlayer();
     Member* member = GetMember(targetGuid);
     GuildRankRights rights = GR_RIGHT_PROMOTE;
@@ -2170,6 +2347,8 @@ void Guild::HandleSetMemberRank(WorldSession* session, uint64 targetGuid, uint64
 
 void Guild::HandleAddNewRank(WorldSession* session, std::string const& name)
 {
+    Skyfire::Chat::GuildState::Command request; request.Type = Skyfire::Chat::GuildState::Action::AddRank; request.Text = name;
+    if (Skyfire::Chat::GuildService::Submit(session, m_id, std::move(request), [](Guild* guild, WorldSession*) { guild->HandleRoster(); })) return;
     uint8 size = _GetRanksSize();
     if (size >= GUILD_RANKS_MAX_COUNT)
         return;
@@ -2182,6 +2361,8 @@ void Guild::HandleAddNewRank(WorldSession* session, std::string const& name)
 
 void Guild::HandleRemoveRank(WorldSession* session, uint8 rankId)
 {
+    Skyfire::Chat::GuildState::Command request; request.Type = Skyfire::Chat::GuildState::Action::RemoveRank; request.RankId = rankId;
+    if (Skyfire::Chat::GuildService::Submit(session, m_id, std::move(request), [](Guild* guild, WorldSession*) { guild->HandleRoster(); })) return;
     // Cannot remove rank if total count is minimum allowed by the client or is not leader
     if (_GetRanksSize() <= GUILD_RANKS_MIN_COUNT || rankId >= _GetRanksSize() || !_IsLeader(session->GetPlayer()))
         return;
@@ -2204,6 +2385,7 @@ void Guild::HandleRemoveRank(WorldSession* session, uint8 rankId)
 
 void Guild::HandleMemberDepositMoney(WorldSession* session, uint64 amount, bool cashFlow /*=false*/)
 {
+    if (Skyfire::Chat::GuildService::Blocked(m_id)) return;
     Player* player = session->GetPlayer();
 
     // Call script after validation and before money transfer.
@@ -2234,6 +2416,7 @@ void Guild::HandleMemberDepositMoney(WorldSession* session, uint64 amount, bool 
 
 bool Guild::HandleMemberWithdrawMoney(WorldSession* session, uint64 amount, bool repair)
 {
+    if (Skyfire::Chat::GuildService::Blocked(m_id)) return false;
     // clamp amount to MAX_MONEY_AMOUNT, Players can't hold more than that anyway
     amount = std::min(amount, uint64(MAX_MONEY_AMOUNT));
 
@@ -2294,6 +2477,8 @@ void Guild::HandleMemberLogout(WorldSession* session)
 
 void Guild::HandleDisband(WorldSession* session)
 {
+    Skyfire::Chat::GuildState::Command request; request.Type = Skyfire::Chat::GuildState::Action::Disband;
+    if (Skyfire::Chat::GuildService::Submit(session, m_id, std::move(request))) return;
     // Only leader can disband guild
     if (_IsLeader(session->GetPlayer()))
     {
@@ -2545,7 +2730,12 @@ bool Guild::LoadMemberFromDB(Field* fields)
     Member* member = new Member(m_id, MAKE_NEW_GUID(lowguid, 0, HIGHGUID_PLAYER), fields[2].GetUInt8());
     if (!member->LoadFromDB(fields))
     {
-        _DeleteMemberFromDB(lowguid);
+        if (Skyfire::Chat::GuildService::Enabled())
+        {
+            SF_LOG_ERROR("guild", "Authoritative guild %u member %u could not be loaded. Repair the character projection before starting world.", m_id, lowguid);
+            delete member; std::exit(1);
+        }
+        if (!ApplyingGuildProjection) _DeleteMemberFromDB(lowguid);
         delete member;
         return false;
     }
@@ -2657,6 +2847,28 @@ bool Guild::LoadBankItemFromDB(Field* fields)
 // Validates guild data loaded from database. Returns false if guild should be deleted.
 bool Guild::Validate()
 {
+    if (Skyfire::Chat::GuildService::Enabled())
+    {
+        Skyfire::Chat::GuildState state; state.Id = m_id; state.Leader = m_leaderGuid;
+        state.Name = m_name; state.Motd = m_motd; state.Info = m_info;
+        bool ordered = true;
+        for (size_t i = 0; i < m_ranks.size(); ++i)
+        {
+            ordered = ordered && m_ranks[i].GetId() == i;
+            state.Ranks.push_back({m_ranks[i].GetName(), m_ranks[i].GetRights()});
+        }
+        for (auto const& entry : m_members)
+        {
+            auto* member = entry.second;
+            state.Members.emplace(member->GetGUID(), Skyfire::Chat::GuildState::Member{member->GetRankId(), member->GetPublicNote(), member->GetOfficerNote()});
+        }
+        if (!ordered || !state.Valid())
+        {
+            SF_LOG_ERROR("guild", "Authoritative guild %u projection is invalid. Startup will not repair chat-owned social state.", m_id);
+            std::exit(1);
+        }
+        _UpdateAccountsNumber(); return true;
+    }
     // Validate ranks data
     // GUILD RANKS represent a sequence starting from 0 = GUILD_MASTER (ALL PRIVILEGES) to max 9 (lowest privileges).
     // The lower rank id is considered higher rank - so promotion does rank-- and demotion does rank++
@@ -2726,9 +2938,45 @@ bool Guild::Validate()
     return true;
 }
 
+void Guild::HandleChatEvent(Skyfire::Chat::ServiceEvent const& event)
+{
+    if (!Skyfire::Chat::GuildService::Enabled() || event.Domain != Skyfire::Chat::ServiceDomain::Guild) return;
+    Skyfire::Chat::GuildInvitationEvent invitation;
+    if (Skyfire::Chat::DecodeGuildInvitationEvent(event.Payload,invitation))
+    {
+        auto* recipient = ObjectAccessor::FindPlayer(event.Recipient);
+        auto* guild = sGuildMgr->GetGuildById(invitation.Guild);
+        if (!guild || !recipient || !recipient->GetSession() || recipient->GetSession()->GetChatIncarnation() != event.Incarnation ||
+            recipient->GetGuildId() || recipient->GetGuildIdInvited() || recipient->GetSocial()->HasIgnore(GUID_LOPART(invitation.Sender)) ||
+            recipient->HasFlag(PLAYER_FIELD_PLAYER_FLAGS,PLAYER_FLAGS_AUTO_DECLINE_GUILD) ||
+            (!sWorld->GetBoolConfig(WorldBoolConfigs::CONFIG_ALLOW_TWO_SIDE_INTERACTION_GUILD) && recipient->GetTeam() != invitation.Team)) return;
+        recipient->SetGuildIdInvited(invitation.Guild); recipient->SetLastGuildInviterGUID(invitation.Sender);
+        guild->SendInvitationPacket(recipient,invitation.Name); return;
+    }
+    Skyfire::Chat::GuildMessageEvent message;
+    if (!Skyfire::Chat::DecodeGuildMessageEvent(event.Payload, message)) return;
+    Player* recipient = ObjectAccessor::FindPlayer(event.Recipient);
+    if (!recipient || !recipient->GetSession() || recipient->GetSession()->GetChatIncarnation() != event.Incarnation ||
+        recipient->GetGuildId() != message.Guild) return;
+    Guild* guild = sGuildMgr->GetGuildById(message.Guild);
+    if (!guild || !guild->_HasRankRight(recipient, message.Officer ? GR_RIGHT_OFFCHATLISTEN : GR_RIGHT_GCHATLISTEN) ||
+        recipient->GetSocial()->HasIgnore(GUID_LOPART(message.Sender)) ||
+        (message.Language == uint32(Language::LANG_ADDON) && !recipient->GetSession()->IsAddonRegistered(message.Prefix))) return;
+    if (Player* sender = ObjectAccessor::FindPlayer(message.Sender))
+        if (!sender->GetSession() || sender->GetSession()->GetChatIncarnation() != message.SenderIncarnation ||
+            sender->GetGuildId() != message.Guild || (message.Language != uint32(Language::LANG_ADDON) &&
+                (!sender->CanSpeak() || sender->HasAura(1852)))) return;
+    WorldPacket packet;
+    ChatHandler::BuildChatPacket(packet, message.Officer ? ChatMsg::CHAT_MSG_OFFICER : ChatMsg::CHAT_MSG_GUILD,
+        Language(message.Language), ObjectGuid(message.Sender), ObjectGuid(0), message.Text, message.ChatTag,
+        message.SenderName, "", 0, false, "", message.Prefix);
+    recipient->GetSession()->SendPacket(&packet);
+}
+
 // Broadcasts
 void Guild::BroadcastToGuild(WorldSession* session, bool officerOnly, std::string const& msg, Language language) const
 {
+    if (Skyfire::Chat::GuildService::Message(session, m_id, officerOnly, msg, uint32(language))) return;
     if (session && session->GetPlayer() && _HasRankRight(session->GetPlayer(), officerOnly ? GR_RIGHT_OFFCHATSPEAK : GR_RIGHT_GCHATSPEAK))
     {
         WorldPacket data;
@@ -2757,6 +3005,7 @@ void Guild::BroadcastToGuild(WorldSession* session, bool officerOnly, std::strin
 
 void Guild::BroadcastAddonToGuild(WorldSession* session, bool officerOnly, std::string const& msg, std::string const& prefix) const
 {
+    if (Skyfire::Chat::GuildService::Message(session, m_id, officerOnly, msg, uint32(Language::LANG_ADDON), prefix)) return;
     if (session && session->GetPlayer() && _HasRankRight(session->GetPlayer(), officerOnly ? GR_RIGHT_OFFCHATSPEAK : GR_RIGHT_GCHATSPEAK))
     {
         WorldPacket data;
@@ -2856,6 +3105,7 @@ void Guild::MassInviteToEvent(WorldSession* session, uint32 minLevel, uint32 max
 // Members handling
 bool Guild::AddMember(uint64 guid, uint8 rankId)
 {
+    if (Skyfire::Chat::GuildService::Enabled() && !ApplyingGuildProjection) return Skyfire::Chat::GuildService::Admin(nullptr, Skyfire::Chat::GuildAdmin::Add, m_id, guid, rankId, "");
     Player* player = ObjectAccessor::FindPlayer(guid);
     // Player cannot be in guild
     if (player)
@@ -2863,12 +3113,12 @@ bool Guild::AddMember(uint64 guid, uint8 rankId)
         if (player->GetGuildId() != 0)
             return false;
     }
-    else if (Player::GetGuildIdFromDB(guid) != 0)
+    else if (!ApplyingGuildProjection && Player::GetGuildIdFromDB(guid) != 0)
         return false;
 
     // Remove all player signs from another petitions
     // This will be prevent attempt to join many guilds and corrupt guild data integrity
-    Player::RemovePetitionsAndSigns(guid, 4); // 4 - GUILD_CHARTER_TYPE
+    if (!ApplyingGuildProjection) Player::RemovePetitionsAndSigns(guid, 4); // 4 - GUILD_CHARTER_TYPE
 
     uint32 lowguid = GUID_LOPART(guid);
 
@@ -2921,7 +3171,7 @@ bool Guild::AddMember(uint64 guid, uint8 rankId)
     }
 
     SQLTransaction trans(NULL);
-    member->SaveToDB(trans);
+    if (!ApplyingGuildProjection) member->SaveToDB(trans);
 
     _UpdateAccountsNumber();
     _LogEvent(GUILD_EVENT_LOG_JOIN_GUILD, lowguid);
@@ -2936,6 +3186,8 @@ bool Guild::AddMember(uint64 guid, uint8 rankId)
 
 void Guild::DeleteMember(uint64 guid, bool isDisbanding, bool isKicked, bool canDeleteGuild)
 {
+    if (Skyfire::Chat::GuildService::Enabled() && !ApplyingGuildProjection)
+    { Skyfire::Chat::GuildService::Admin(nullptr, Skyfire::Chat::GuildAdmin::Remove, m_id, guid, 0, ""); return; }
     uint32 lowguid = GUID_LOPART(guid);
     Player* player = ObjectAccessor::FindPlayer(guid);
 
@@ -2994,13 +3246,14 @@ void Guild::DeleteMember(uint64 guid, bool isDisbanding, bool isKicked, bool can
                     player->removeSpell(entry->SpellId, false, false);
     }
 
-    _DeleteMemberFromDB(lowguid);
+    if (!ApplyingGuildProjection) _DeleteMemberFromDB(lowguid);
     if (!isDisbanding)
         _UpdateAccountsNumber();
 }
 
 bool Guild::ChangeMemberRank(uint64 guid, uint8 newRank)
 {
+    if (Skyfire::Chat::GuildService::Enabled()) return Skyfire::Chat::GuildService::Admin(nullptr, Skyfire::Chat::GuildAdmin::Rank, m_id, guid, newRank, "");
     if (newRank <= _GetLowestRankId())                    // Validate rank (allow only existing ranks)
         if (Member* member = GetMember(guid))
         {
@@ -3019,6 +3272,7 @@ bool Guild::IsMember(uint64 guid) const
 // Bank (items move)
 void Guild::SwapItems(Player* player, uint8 tabId, uint8 slotId, uint8 destTabId, uint8 destSlotId, uint32 splitedAmount)
 {
+    if (Skyfire::Chat::GuildService::Blocked(m_id)) return;
     if (tabId >= _GetPurchasedTabsSize() || slotId >= GUILD_BANK_MAX_SLOTS ||
         destTabId >= _GetPurchasedTabsSize() || destSlotId >= GUILD_BANK_MAX_SLOTS)
         return;
@@ -3033,6 +3287,7 @@ void Guild::SwapItems(Player* player, uint8 tabId, uint8 slotId, uint8 destTabId
 
 void Guild::SwapItemsWithInventory(Player* player, bool toChar, uint8 tabId, uint8 slotId, uint8 playerBag, uint8 playerSlotId, uint32 splitedAmount)
 {
+    if (Skyfire::Chat::GuildService::Blocked(m_id)) return;
     if ((slotId >= GUILD_BANK_MAX_SLOTS && slotId != NULL_SLOT) || tabId >= _GetPurchasedTabsSize())
         return;
 
@@ -3863,6 +4118,7 @@ void Guild::HandleNewsSetSticky(WorldSession* session, uint32 newsId, bool stick
 
 void Guild::HandleSetBankTabNote(WorldSession* session, uint32 tabId, std::string const& note)
 {
+    if (Skyfire::Chat::GuildService::Blocked(m_id)) return;
     BankTab* bankTab = GetBankTab(tabId);
     if (!bankTab)
     {

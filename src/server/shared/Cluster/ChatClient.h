@@ -7,6 +7,7 @@
 #include "ChatPresence.h"
 #include "ChatWhisper.h"
 #include "ChatRouting.h"
+#include "ChatService.h"
 #include "ClusterAgent.h"
 #include <chrono>
 namespace Skyfire::Chat
@@ -30,6 +31,16 @@ namespace Skyfire::Chat
     bool RoutingEnabled();
     std::uint64_t QueueRoute(AudienceProjection projection, RoutedMessage message);
     std::vector<RouteResult> TakeRouteResults();
+    struct ServiceResult
+    {
+        ServiceRequest Request;
+        ServiceResponse Response;
+        bool Success = false;
+        std::chrono::steady_clock::time_point Deadline;
+    };
+    std::uint64_t QueueServiceRequest(ServiceRequest request);
+    std::vector<ServiceResult> TakeServiceResults();
+    std::vector<ServiceEvent> TakeServiceEvents();
     bool ClientEnabled();
     void PublishPresence(std::vector<PlayerPresence> players);
 }

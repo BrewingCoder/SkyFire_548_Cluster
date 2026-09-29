@@ -271,6 +271,15 @@ void GuildFinderMgr::SetGuildSettings(uint32 guildGuid, LFGuildSettings const& s
     CharacterDatabase.CommitTransaction(trans);
 }
 
+void GuildFinderMgr::ForgetGuild(uint32 guildId)
+{
+    auto requests = std::move(_membershipRequests[guildId]);
+    _membershipRequests.erase(guildId); _guildSettings.erase(guildId);
+    for (auto const& request : requests)
+        if (Player* player = ObjectAccessor::FindPlayer(MAKE_NEW_GUID(request.GetPlayerGUID(), 0, HIGHGUID_PLAYER)))
+            SendMembershipRequestListUpdate(*player);
+}
+
 void GuildFinderMgr::DeleteGuild(uint32 guildId)
 {
     std::vector<MembershipRequest>::iterator itr = _membershipRequests[guildId].begin();

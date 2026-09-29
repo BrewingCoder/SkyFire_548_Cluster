@@ -42,7 +42,7 @@ class Metrics:
         self.latency_us += int((time.monotonic()-started)*1000000)
         if not success:
             self.failures += 1
-        elif operation in (2, 4, 17, 19):
+        elif operation in (2, 4, 17, 19, 20):
             self.reads += 1
         else:
             self.writes += 1

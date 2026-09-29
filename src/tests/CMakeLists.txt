@@ -1078,5 +1078,13 @@ endif()
 add_test(NAME social_snapshot_tests COMMAND social_snapshot_tests)
 
 add_executable(channel_state_tests ChannelStateTests.cpp)
-target_include_directories(channel_state_tests PRIVATE ${CMAKE_SOURCE_DIR}/src/server/chatserver)
+target_include_directories(channel_state_tests PRIVATE ${CMAKE_SOURCE_DIR}/src/server/chatserver ${CMAKE_SOURCE_DIR}/src/server/shared)
 add_test(NAME channel_state_tests COMMAND channel_state_tests)
+
+add_executable(guild_state_tests GuildStateTests.cpp)
+target_include_directories(guild_state_tests PRIVATE ${CMAKE_SOURCE_DIR}/src/server/chatserver ${CMAKE_SOURCE_DIR}/src/server/shared)
+add_test(NAME guild_state_tests COMMAND guild_state_tests)
+
+add_executable(chat_service_tests ChatServiceTests.cpp)
+target_include_directories(chat_service_tests PRIVATE ${CMAKE_SOURCE_DIR}/src/server/shared)
+add_test(NAME chat_service_tests COMMAND chat_service_tests)

@@ -227,6 +227,7 @@ public:
 
     /// Wipes everything related to a guild. Used when that guild is disbanded
     void DeleteGuild(uint32 guildId);
+    void ForgetGuild(uint32 guildId);
 
     /**
      * @brief Returns a set of membership requests for a guild

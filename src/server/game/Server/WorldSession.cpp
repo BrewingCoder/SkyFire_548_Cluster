@@ -682,6 +682,8 @@ void WorldSession::LogoutPlayer(bool save)
             _map->RemovePlayerFromMap(_player, true);
 
         SetPlayer(NULL); //! Pointer already deleted during RemovePlayerFromMap
+        // Retire chat presence promptly; the authority prunes disconnected memberships.
+        sWorld->PublishChatPresence();
 
         //! Send the 'logout complete' packet to the client
         //! Client will respond by sending 3x CMSG_CANCEL_TRADE, which we currently dont handle

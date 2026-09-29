@@ -14,6 +14,7 @@ EndScriptData */
 #include "Chat.h"
 #include "Guild.h"
 #include "GuildMgr.h"
+#include "GuildService.h"
 #include "Language.h"
 #include "ObjectAccessor.h"
 #include "ScriptMgr.h"
@@ -75,6 +76,10 @@ public:
             return true;
         }
 
+        if (Skyfire::Chat::GuildService::Enabled())
+            return Skyfire::Chat::GuildService::Admin(handler->GetSession(), Skyfire::Chat::GuildAdmin::Create,
+                sGuildMgr->GenerateGuildId(), target->GetGUID(), 0, guildName);
+
         Guild* guild = new Guild;
         if (!guild->Create(target, guildName))
         {
@@ -103,6 +108,10 @@ public:
         Guild* targetGuild = sGuildMgr->GetGuildByName(guildName);
         if (!targetGuild)
             return false;
+
+        if (Skyfire::Chat::GuildService::Enabled())
+            return Skyfire::Chat::GuildService::Admin(handler->GetSession(), Skyfire::Chat::GuildAdmin::Delete,
+                targetGuild->GetId(), 0, 0, "");
 
         targetGuild->Disband();
         delete targetGuild;
@@ -133,6 +142,10 @@ public:
         if (!targetGuild)
             return false;
 
+        if (Skyfire::Chat::GuildService::Enabled())
+            return Skyfire::Chat::GuildService::Admin(handler->GetSession(), Skyfire::Chat::GuildAdmin::Add,
+                targetGuild->GetId(), targetGuid, 0, "");
+
         // player's guild membership checked in AddMember before add
         return targetGuild->AddMember(targetGuid);
     }
@@ -151,6 +164,10 @@ public:
         Guild* targetGuild = sGuildMgr->GetGuildById(guildId);
         if (!targetGuild)
             return false;
+
+        if (Skyfire::Chat::GuildService::Enabled())
+            return Skyfire::Chat::GuildService::Admin(handler->GetSession(), Skyfire::Chat::GuildAdmin::Remove,
+                targetGuild->GetId(), targetGuid, 0, "");
 
         targetGuild->DeleteMember(targetGuid, false, true, true);
         return true;
@@ -178,7 +195,13 @@ public:
         if (!targetGuild)
             return false;
 
-        uint8 newRank = uint8(atoi(rankStr));
+        char* end = nullptr;
+        auto parsedRank = strtoul(rankStr, &end, 10);
+        if (!*rankStr || *end || parsedRank > 255) return false;
+        uint8 newRank = uint8(parsedRank);
+        if (Skyfire::Chat::GuildService::Enabled())
+            return Skyfire::Chat::GuildService::Admin(handler->GetSession(), Skyfire::Chat::GuildAdmin::Rank,
+                targetGuild->GetId(), targetGuid, newRank, "");
         return targetGuild->ChangeMemberRank(targetGuid, newRank);
     }
 
@@ -219,6 +242,10 @@ public:
             handler->SetSentErrorMessage(true);
             return false;
         }
+
+        if (Skyfire::Chat::GuildService::Enabled())
+            return Skyfire::Chat::GuildService::Admin(handler->GetSession(), Skyfire::Chat::GuildAdmin::Rename,
+                guild->GetId(), 0, 0, newGuildStr);
 
         if (!guild->SetName(newGuildStr))
         {

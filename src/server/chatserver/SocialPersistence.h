@@ -39,7 +39,8 @@ namespace Skyfire::Chat
         bool Enabled() const;
         bool Read(std::uint32_t realm, std::string const& domain, std::string const& key, SocialRecord& record) const;
         bool Submit(std::uint32_t realm, std::string const& domain, std::string const& request,
-            std::string const& key, std::uint64_t expected, std::uint64_t actor, boost::json::value document);
+            std::string const& key, std::uint64_t expected, std::uint64_t actor, boost::json::value document,
+            boost::json::value context = nullptr);
         std::vector<Result> TakeResults();
         void Stop();
     private:

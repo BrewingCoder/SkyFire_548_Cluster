@@ -8,18 +8,29 @@ from pathlib import Path
 import secrets
 import sys
 import tomllib
-import unicodedata
-from social_store import document, integer
+from social_store import document, integer, guild_membership
 
 MAX_RECORDS = 8192
 MAX_BYTES = 4 * 1024 * 1024
 SOURCE_TABLES = ('channels', 'guild', 'guild_rank', 'guild_member')
-DESTINATION_TABLES = tuple('character_social_' + name for name in ('owners', 'records', 'outbox', 'receipts', 'retired'))
+DESTINATION_TABLES = tuple('character_social_' + name for name in ('owners', 'records', 'outbox', 'receipts', 'retired', 'guild_members', 'consumed_items'))
+
+
+def channel_name(name):
+    # Match Util.h::wcharToLower exactly. Unicode casefold/NFC would merge names
+    # that the existing ChannelMgr treats as different channels (for example ss/ß).
+    def lower(value):
+        code = ord(value)
+        if 0x41 <= code <= 0x5a or 0xc0 <= code <= 0xd6 or 0xd8 <= code <= 0xde or 0x410 <= code <= 0x42f:
+            return chr(code + 0x20)
+        if 0x100 <= code <= 0x12e and code % 2 == 0:
+            return chr(code + 1)
+        return {0x1e9e: 'ß', 0x401: 'ё'}.get(code, value)
+    return ''.join(lower(value) for value in name)
 
 
 def channel_key(name, team):
-    # Realm is the outer SQL partition; team remains part of channel identity.
-    value = str(team) + ':' + unicodedata.normalize('NFC', name).casefold()
+    value = str(team) + ':' + channel_name(name)
     return 'channel-' + hashlib.sha256(value.encode()).hexdigest()
 
 
@@ -139,6 +150,8 @@ def stage(connection, realm, apply=False):
                     cursor.execute('INSERT INTO character_social_owners(realm,domain,epoch,node,instance,revision) VALUES(%s,%s,1,%s,%s,%s)',
                                    (realm, domain, 'legacy-import', instance, len(entries)))
                     for revision, (key, value) in enumerate(entries, 1):
+                        if domain == 'guilds':
+                            guild_membership(cursor, realm, key, json.loads(value))
                         cursor.execute('INSERT INTO character_social_records(realm,domain,record_key,revision,document) VALUES(%s,%s,%s,%s,%s)',
                                        (realm, domain, key.encode(), revision, value))
                         cursor.execute('INSERT INTO character_social_outbox(realm,domain,revision,record_key,document,actor) VALUES(%s,%s,%s,%s,%s,0)',

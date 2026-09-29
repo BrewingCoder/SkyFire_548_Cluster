@@ -3,6 +3,8 @@
 * See LICENSE.md file for Copyright information
 */
 #include "ChatServer.h"
+#include "GuildAuthority.h"
+#include "ChannelAuthority.h"
 #include "Cluster/ChatProtocol.h"
 #include "Configuration/Config.h"
 #include "Configuration/ConfigVersion.h"
@@ -41,7 +43,7 @@ int main(int argc, char** argv)
     {
         std::string argument = argv[i];
         if (argument == "--help")
-        { std::puts("chatserver -c chatserver.conf\nNative chat service; realm presence and same-world whisper relay."); return 0; }
+        { std::puts("chatserver -c chatserver.conf\nNative realm-scoped chat, channel and guild service."); return 0; }
         if (argument == "-c" && i + 1 < argc) config = argv[++i];
         else if (argument == "--hub-node-key" && i + 1 < argc) expectedKey = argv[++i];
         else if (argument == "--hub-control-read" && i + 1 < argc && Handle(argv[++i], control)) { }
@@ -107,6 +109,38 @@ int main(int argc, char** argv)
     Skyfire::Chat::Server server;
     if (!server.Open(std::move(options), agentOptions, error))
     { SF_LOG_ERROR("server.chat", "%s", error.c_str()); return 1; }
+    Skyfire::Chat::GuildAuthority guilds(server.GetPersistence(),
+        [&](std::uint32_t realm, std::uint64_t guid, std::uint64_t incarnation)
+        {
+            auto now = std::uint64_t(std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now().time_since_epoch()).count());
+            return server.GetPresence().FindAny(realm, guid, incarnation, now) != nullptr;
+        });
+    Skyfire::Chat::ChannelAuthority channels(server.GetPresence(), server.GetPersistence(),
+        [&](std::uint32_t realm, std::vector<Skyfire::Chat::ServiceEvent> events) { return server.EmitServiceEvents(realm, std::move(events)); });
+    guilds.SetMessaging([&](std::uint32_t realm, std::uint64_t guid) -> std::optional<Skyfire::Chat::PlayerPresence>
+        {
+            auto now = std::uint64_t(std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now().time_since_epoch()).count());
+            if (auto* player = server.GetPresence().FindByGuid(realm,guid,now)) return *player;
+            return std::nullopt;
+        }, [&](std::uint32_t realm, Skyfire::Chat::ServiceEvent event) { return server.EmitServiceEvent(realm,std::move(event)); });
+    guilds.SetNames([&](std::uint32_t realm, std::string const& name) -> std::optional<Skyfire::Chat::PlayerPresence>
+    {
+        auto now = std::uint64_t(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());
+        if (auto* player = server.GetPresence().FindByName(realm,name,now)) return *player;
+        return std::nullopt;
+    });
+    server.SetServiceHandler([&](std::uint32_t realm, std::string const& node,
+        Skyfire::Chat::ServiceRequest const& request, Skyfire::Chat::ServiceCompletion complete)
+    {
+        if (request.Domain == Skyfire::Chat::ServiceDomain::Guild)
+            guilds.Handle(realm, node, request, std::move(complete));
+        else if (request.Domain == Skyfire::Chat::ServiceDomain::Channel)
+            channels.Handle(realm, node, request, std::move(complete));
+        else
+            complete({request.Sequence, Skyfire::Chat::ServiceStatus::Unavailable, {}});
+    });
     std::mutex sampleMutex;
     Skyfire::Cluster::AgentSample sample;
     sample.Ready = server.Ready();
@@ -122,13 +156,19 @@ int main(int argc, char** argv)
 #endif
     bool registered = false;
     if (control) channel.SendStatus(Skyfire::HubControl::StartingMessage);
-    SF_LOG_INFO("server.chat", "Chat listening; authenticated health, scoped presence and same-world whisper relay enabled.");
+    SF_LOG_INFO("server.chat", "Chat listening; authenticated realm-scoped messaging and social service requests enabled.");
     auto heartbeat = std::chrono::steady_clock::now();
     int result = 0;
     try
     {
         while (!Stopping && !(control && channel.StopRequested()))
         {
+            auto const tick = std::uint64_t(std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now().time_since_epoch()).count());
+            auto const completions = server.GetPersistence().TakeResults();
+            channels.Update(tick, completions);
+            for (auto const& completion : completions)
+                guilds.Complete(completion);
             server.Update();
             {
                 std::lock_guard<std::mutex> lock(sampleMutex);
