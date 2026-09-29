@@ -33,7 +33,7 @@ int main()
         auto keyPath = (root / "client-key.pem").string(), certPath = (root / "client.pem").string();
         C::Write(keyPath, C::Pem(key.get())); auto csr = C::Request(keyPath, "world-1");
         Rejected([&] { H::Token("..", 2, "localhost", "test"); });
-        Rejected([&] { H::Token("world-1", 6, "localhost", "test"); });
+        Rejected([&] { H::Token("world-1", 7, "localhost", "test"); });
         auto token = H::Token("world-1", 2, "localhost,127.0.0.1", "test");
         auto wire = H::Enroll(token, csr);
         Rejected([&] { H::Enroll(token, csr); });
@@ -52,6 +52,12 @@ int main()
         Check(C::InstallCertificate(replacement, certPath, keyPath, H::ListenerPath("CA"), "world-1"));
         cert.reset(C::Certificate(certPath)); Check(H::Allowed(cert.get()));
         Rejected([&] { H::Renew(cert.get(), csr); }); // Not yet in its renewal window.
+        auto bgCsr = C::Request(keyPath,"battleground-1");
+        auto bgWire = H::Enroll(H::Token("battleground-1",6,"localhost","test"),bgCsr);
+        auto bgPath = (root / "battleground.pem").string();
+        Check(C::InstallCertificate(bgWire,bgPath,keyPath,H::ListenerPath("CA"),"battleground-1"));
+        std::unique_ptr<X509,decltype(&X509_free)> bg(C::Certificate(bgPath),X509_free);
+        Check(C::Role(bg.get()) == 6 && H::Allowed(bg.get()));
         auto managed = (root / "chat.conf").string();
         C::Write(managed, "Cluster.NodeKey = \"chat-1\"\nCluster.AdvertiseAddress = \"127.0.0.1\"\n");
         Check(H::Prepare(managed, 5, error));

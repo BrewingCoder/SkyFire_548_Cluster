@@ -1088,6 +1088,13 @@ add_test(NAME guild_state_tests COMMAND guild_state_tests)
 add_executable(chat_service_tests ChatServiceTests.cpp)
 target_include_directories(chat_service_tests PRIVATE ${CMAKE_SOURCE_DIR}/src/server/shared)
 add_test(NAME chat_service_tests COMMAND chat_service_tests)
+add_executable(battleground_protocol_tests BattlegroundProtocolTests.cpp)
+target_include_directories(battleground_protocol_tests PRIVATE ${CMAKE_SOURCE_DIR}/src/server/shared)
+add_test(NAME battleground_protocol_tests COMMAND battleground_protocol_tests)
+
+add_executable(battleground_matcher_tests BattlegroundMatcherTests.cpp)
+target_include_directories(battleground_matcher_tests PRIVATE ${CMAKE_SOURCE_DIR}/src/server/shared)
+add_test(NAME battleground_matcher_tests COMMAND battleground_matcher_tests)
 
 # Integration driver launched by chat_service_test.py; requires its disposable TLS setup.
 add_executable(chat_failover_client ChatFailoverClient.cpp)

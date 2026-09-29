@@ -507,7 +507,7 @@ int main(int argc, char** argv)
 
         auto const liveNodes = clusterServer.Snapshot();
         processSupervisor.UpdateBackupCycle(std::none_of(liveNodes.begin(), liveNodes.end(),
-            [](Skyfire::Cluster::Node const& node) { return node.Type != Skyfire::Cluster::Service::Map && node.Type != Skyfire::Cluster::Service::Chat &&
+            [](Skyfire::Cluster::Node const& node) { return node.Type != Skyfire::Cluster::Service::Map && node.Type != Skyfire::Cluster::Service::Chat && node.Type != Skyfire::Cluster::Service::Battleground &&
                 (node.Type != Skyfire::Cluster::Service::Character || node.Load != 0); }));
         authnetProxy.Update(liveNodes);
         legacyProxy.Update(liveNodes);

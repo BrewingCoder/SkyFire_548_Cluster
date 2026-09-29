@@ -117,7 +117,7 @@ namespace Skyfire::HubCertificates
         }
         void SaveProfile(Profile const& profile)
         {
-            Require(SafeNode(profile.Node) && profile.Role >= 1 && profile.Role <= 5);
+            Require(SafeNode(profile.Node) && profile.Role >= 1 && profile.Role <= 6);
             Write(Root / "profiles" / profile.Node, std::to_string(profile.Role) + '\n' + profile.Names + '\n' + profile.Certificate + '\n' + profile.Key + '\n');
             Profiles[profile.Node] = profile;
         }
@@ -242,7 +242,7 @@ namespace Skyfire::HubCertificates
                 std::istringstream input(Read(file.path())); Profile p; p.Node = node;
                 std::string role; std::getline(input, role); p.Role = unsigned(std::stoul(role));
                 std::getline(input, p.Names); std::getline(input, p.Certificate); std::getline(input, p.Key);
-                Require(p.Role >= 1 && p.Role <= 5); San(p.Names); Profiles[node] = p;
+                Require(p.Role >= 1 && p.Role <= 6); San(p.Names); Profiles[node] = p;
             }
             for (auto const& file : fs::directory_iterator(Root / "issued"))
             {
@@ -285,7 +285,7 @@ namespace Skyfire::HubCertificates
     std::string Token(std::string const& node, unsigned role, std::string const& names, std::string const& actor)
     {
         std::lock_guard<std::recursive_mutex> lock(Mutex);
-        Require(Active && SafeNode(node) && node != "skyfire-hub-authority" && role >= 1 && role <= 5); San(names);
+        Require(Active && SafeNode(node) && node != "skyfire-hub-authority" && role >= 1 && role <= 6); San(names);
         auto profile = Profiles.find(node);
         Require(profile == Profiles.end() || (profile->second.Key.empty() && profile->second.Role == role));
         unsigned outstanding = 0;
@@ -309,7 +309,7 @@ namespace Skyfire::HubCertificates
         auto hash = C::Digest(token); auto ticket = Root / "tokens" / hash;
         std::istringstream input(Read(ticket)); Profile p; std::string role, expires;
         std::getline(input, p.Node); std::getline(input, role); std::getline(input, p.Names); std::getline(input, expires);
-        p.Role = unsigned(std::stoul(role)); Require(SafeNode(p.Node) && p.Role >= 1 && p.Role <= 5 &&
+        p.Role = unsigned(std::stoul(role)); Require(SafeNode(p.Node) && p.Role >= 1 && p.Role <= 6 &&
             std::stoll(expires) > std::time(nullptr) && (Profiles.count(p.Node) || Profiles.size() < 128)); San(p.Names);
         auto existing = Profiles.find(p.Node);
         Require(existing == Profiles.end() || (existing->second.Key.empty() && existing->second.Role == p.Role));

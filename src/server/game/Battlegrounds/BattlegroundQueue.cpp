@@ -120,6 +120,7 @@ GroupQueueInfo* BattlegroundQueue::AddGroup(Player* leader, Group* grp, Battlegr
 
     // create new ginfo
     GroupQueueInfo* ginfo = new GroupQueueInfo;
+    ginfo->RemoteId = ++m_NextRemoteId;
     ginfo->BgTypeId = BgTypeId;
     ginfo->ArenaType = ArenaType;
     ginfo->ArenaGroup = grp;
@@ -722,6 +723,9 @@ should be called from Battleground::RemovePlayer function in some cases
 void BattlegroundQueue::BattlegroundQueueUpdate(uint32 /*diff*/, BattlegroundTypeId bgTypeId, BattlegroundBracketId bracket_id, uint8 arenaType, bool isRated, uint32 arenaRating)
 {
     uint8 BracketID = uint8(bracket_id);
+    if (Skyfire::BattlegroundService::Enabled() && !isRated && !arenaType)
+        if (auto* model = sBattlegroundMgr->GetBattlegroundTemplate(bgTypeId))
+            if (model->isBattleground()) { SubmitRemoteQueue(bgTypeId,bracket_id); return; }
     //if no players in queue - do nothing
     if (m_QueuedGroups[BracketID][BG_QUEUE_PREMADE_ALLIANCE].empty() &&
         m_QueuedGroups[BracketID][BG_QUEUE_PREMADE_HORDE].empty() &&

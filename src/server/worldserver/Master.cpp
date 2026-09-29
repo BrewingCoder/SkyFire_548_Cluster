@@ -25,6 +25,7 @@
 #include "Database/DatabaseWorkerPool.h"
 #include "Configuration/ConfigVersion.h"
 #include "Cluster/ChatClient.h"
+#include "Cluster/BattlegroundClient.h"
 #include "SystemConfig.h"
 #include "World.h"
 #include "WorldRunnable.h"
@@ -443,6 +444,19 @@ int Master::Run(Skyfire::HubControl::ChildChannel* hubControl)
         SF_LOG_WARN("server.worldserver", "Chat presence disabled: %s", clusterError.c_str());
     }
 
+    if (!Skyfire::BattlegroundService::StartClient(clusterOptions, clusterError))
+    {
+        SF_LOG_ERROR("server.worldserver", "Cannot start battleground matchmaking transport: %s", clusterError.c_str());
+        Skyfire::Chat::StopClient();
+        _StopDB();
+        return 1;
+    }
+    // Cover early startup failures as well as normal shutdown. The client owns no world pointers.
+    struct BattlegroundClientGuard
+    {
+        ~BattlegroundClientGuard() { Skyfire::BattlegroundService::StopClient(); }
+    } battlegroundClientGuard;
+
     ///- Register worldserver's signal handlers
     std::signal(SIGINT, WorldServerSignalHandler);
     std::signal(SIGTERM, WorldServerSignalHandler);
@@ -664,6 +678,7 @@ int Master::Run(Skyfire::HubControl::ChildChannel* hubControl)
     // since worldrunnable uses them, it will crash if unloaded after master
     worldRunner.Join();
 
+    Skyfire::BattlegroundService::StopClient();
     Skyfire::Chat::StopClient();
     clusterAgent.Stop();
 

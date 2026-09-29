@@ -206,14 +206,14 @@ bool HubCommandHandler::Execute(std::string const& commandLine, HubCommandOrigin
         try
         {
             if (action == "list" && !(input >> extra)) std::printf("%s\n", Skyfire::HubCertificates::Status().c_str());
-            else if (action == "token" && input >> node >> role >> names && !(input >> extra) && role.size() == 1 && role[0] >= '1' && role[0] <= '5')
+            else if (action == "token" && input >> node >> role >> names && !(input >> extra) && role.size() == 1 && role[0] >= '1' && role[0] <= '6')
                 std::printf("One-time enrollment token (10 minutes): %s\n", Skyfire::HubCertificates::Token(node, unsigned(role[0]-'0'), names, "local-console").c_str());
             else if ((action == "revoke" || action == "regenerate") && input >> node && !(input >> extra))
             {
                 bool ok = action == "revoke" ? Skyfire::HubCertificates::Revoke(node, "local-console", error) : Skyfire::HubCertificates::Regenerate(node, "local-console", error);
                 std::printf("%s\n", ok ? "Certificate action completed." : error.c_str());
             }
-            else std::printf("Usage: certificates list | token <node> <role 1..5> <DNS/IP CSV> | revoke <node> | regenerate <node>\n");
+            else std::printf("Usage: certificates list | token <node> <role 1..6> <DNS/IP CSV> | revoke <node> | regenerate <node>\n");
         }
         catch (...) { std::printf("Certificate operation failed; check PKI configuration and storage.\n"); }
     }
@@ -471,7 +471,7 @@ void HubCommandHandler::PrintHelp() const
 {
     std::printf("Available hub commands:\n");
     std::printf("  help       Show this command list.\n");
-    std::printf("  certificates list | token <node> <role 1..5> <DNS/IP CSV> | revoke <node> | regenerate <node>\n");
+    std::printf("  certificates list | token <node> <role 1..6> <DNS/IP CSV> | revoke <node> | regenerate <node>\n");
     std::printf("  status     Show hub uptime, endpoint, and database record counts.\n");
     std::printf("  nodes      List enabled routing nodes.\n");
     std::printf("  registry   List authenticated live cluster registrations.\n");
@@ -556,7 +556,7 @@ void HubCommandHandler::PrintRegistry() const
     for (auto const& node : nodes)
     {
         std::printf("  %s (%s) %s %s:%u realm %u build %u load %u/%u %s\n", node.Key.c_str(), node.Name.c_str(),
-            node.Type == Skyfire::Cluster::Service::Auth ? ((node.Capabilities & 16) ? "authnet" : "auth") : node.Type == Skyfire::Cluster::Service::Map ? "mapserver" : node.Type == Skyfire::Cluster::Service::Character ? "characterserver" : node.Type == Skyfire::Cluster::Service::Chat ? "chatserver" : "world", node.Address.c_str(), unsigned(node.Port),
+            node.Type == Skyfire::Cluster::Service::Auth ? ((node.Capabilities & 16) ? "authnet" : "auth") : node.Type == Skyfire::Cluster::Service::Map ? "mapserver" : node.Type == Skyfire::Cluster::Service::Character ? "characterserver" : node.Type == Skyfire::Cluster::Service::Chat ? "chatserver" : node.Type == Skyfire::Cluster::Service::Battleground ? "battlegroundserver" : "world", node.Address.c_str(), unsigned(node.Port),
             node.Realm, node.Build, node.Load, node.Capacity, node.Ready ? "ready" : "not ready");
         std::printf("    %s | policy %s | hub connections %llu\n",node.Live ? "registered" : "offline",
             Skyfire::Cluster::AdministrationName(node.Admin),static_cast<unsigned long long>(counts[node.Key]));

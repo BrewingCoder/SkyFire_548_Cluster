@@ -5,6 +5,7 @@
 
 #include "ArenaTeamMgr.h"
 #include "Common.h"
+#include "Cluster/BattlegroundClient.h"
 #include "ObjectMgr.h"
 #include "World.h"
 #include "WorldPacket.h"
@@ -99,6 +100,15 @@ void BattlegroundMgr::Update(uint32 diff)
     // update events timer
     for (int qtype = BATTLEGROUND_QUEUE_NONE; qtype < MAX_BATTLEGROUND_QUEUE_TYPES; ++qtype)
         m_BattlegroundQueues[qtype].UpdateEvents(diff);
+
+    for (auto const& result : Skyfire::BattlegroundService::TakeResults())
+    {
+        auto queue = BGQueueTypeId(BattlegroundTypeId(result.Request.Type),0);
+        if (queue > BATTLEGROUND_QUEUE_NONE && queue < MAX_BATTLEGROUND_QUEUE_TYPES)
+            m_BattlegroundQueues[queue].HandleRemoteResult(result);
+    }
+    for (int queue = BATTLEGROUND_QUEUE_NONE + 1; queue < MAX_BATTLEGROUND_QUEUE_TYPES; ++queue)
+        m_BattlegroundQueues[queue].UpdateRemoteQueues();
 
     // update scheduled queues
     if (!m_QueueUpdateScheduler.empty())

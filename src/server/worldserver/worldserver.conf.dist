@@ -2,7 +2,7 @@
 #   SkyFire World Server configuration file    #
 ################################################
 [worldserver]
-ConfVersion = 2026272808
+ConfVersion = 2026272809
 
 ###################################################################################################
 # SECTION INDEX
@@ -3467,3 +3467,15 @@ ChatService.Messages = 0
 # All nodes for a realm must agree. Enabled authorities never fall back to legacy SQL.
 Chat.ChannelAuthority.Enable = 0
 Chat.GuildAuthority.Enable = 0
+
+###################################################################################################
+# BATTLEGROUND MATCHMAKING SERVICE
+# Off by default. When enabled, unrated battleground queue selection and backfill use the
+# realm-scoped battlegroundserver. Worldserver validates proposals and hosts matches.
+# Arenas and rated queues continue using the local matcher. An unavailable service holds
+# unrated queues; it never falls back to a competing local matcher.
+# Requires Cluster.Enable and world TLS credentials authorized by battlegroundserver.
+BattlegroundService.Enable = 0
+BattlegroundService.Host = "127.0.0.1"
+BattlegroundService.Port = 54950
+BattlegroundService.NodeKey = "skyfire-battleground-primary"

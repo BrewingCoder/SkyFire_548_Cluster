@@ -175,7 +175,7 @@ int main(int argc, char** argv)
                 sample.Chat = server.Metrics(); sample.Load = sample.Chat.Connections; sample.Ready = server.Ready();
             }
             std::string const current = agent.IsRegistered() && server.Ready() ? Skyfire::HubControl::ReadyMessage :
-                agent.IsRegistered() && server.GetPersistence().Standby() ? "STANDBY" : "NOT_READY";
+                agent.IsRegistered() && server.GetPersistence().Standby() ? Skyfire::HubControl::StandbyMessage : "NOT_READY";
             if (control && current != serviceStatus)
             { channel.SendStatus(current.c_str()); serviceStatus = current; }
             auto now = std::chrono::steady_clock::now();

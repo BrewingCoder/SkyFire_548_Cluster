@@ -22,6 +22,7 @@ if( SERVERS )
   add_subdirectory(mapserver)
   add_subdirectory(characterserver)
   add_subdirectory(chatserver)
+  add_subdirectory(battlegroundserver)
 
   skyfire_install_windows_runtime_dependencies()
 else()

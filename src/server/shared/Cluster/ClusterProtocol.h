@@ -42,9 +42,9 @@ namespace Skyfire::Cluster
         if (type == Message::Enroll || type == Message::Renew || type == Message::Enrolled || type == Message::Renewed) return 12000;
         return MaximumPayload;
     }
-    // Character: capability 1024. Chat: capability 2048, realm coverage in metrics.
-    // Both register with realm 0; only world nodes publish authentication realm routes.
-    enum class Service : std::uint8_t { Auth = 1, World = 2, Map = 3, Character = 4, Chat = 5 };
+    // Character: 1024; Chat: 2048; Battleground: 4096, realm coverage in metrics.
+    // These register with realm 0; only world nodes publish authentication realm routes.
+    enum class Service : std::uint8_t { Auth = 1, World = 2, Map = 3, Character = 4, Chat = 5, Battleground = 6 };
     // Hub-owned policy, never accepted from a node registration or heartbeat.
     enum class Administration : std::uint8_t { Enabled = 0, Draining = 1, Disabled = 2 };
     inline char const* AdministrationName(Administration state)
@@ -76,6 +76,13 @@ namespace Skyfire::Cluster
         std::uint32_t RoutedMessages = 0, RoutedRecipients = 0, RoutedControls = 0;
         std::uint64_t ReceivedAt = 0;
     };
+    struct BattlegroundMetrics
+    {
+        std::uint32_t Uptime = 0, Connections = 0, Requests = 0, Failures = 0,
+            QueuedGroups = 0, QueuedPlayers = 0, Proposals = 0;
+        std::vector<std::uint32_t> Realms;
+        std::uint64_t ReceivedAt = 0;
+    };
     struct Node
     {
         std::string Key, Name, Address;
@@ -83,6 +90,7 @@ namespace Skyfire::Cluster
         MapMetrics Metrics;
         CharacterMetrics Character;
         ChatMetrics Chat;
+        BattlegroundMetrics Battleground;
         Service Type = Service::Auth;
         std::uint16_t Port = 0;
         std::uint32_t Realm = 0, Build = 0, Capacity = 0, Capabilities = 0, Load = 0;
@@ -170,13 +178,13 @@ namespace Skyfire::Cluster
         Reader reader(bytes);
         std::uint8_t type;
         if (!reader.String(node.Key, 64) || !ValidKey(node.Key) || !reader.String(node.Name, 100) ||
-            !reader.U8(type) || (type != 1 && type != 2 && type != 3 && type != 4 && type != 5) || !reader.String(node.Address, 64) ||
+            !reader.U8(type) || (type != 1 && type != 2 && type != 3 && type != 4 && type != 5 && type != 6) || !reader.String(node.Address, 64) ||
             !reader.U16(node.Port) || !node.Port || !reader.U32(node.Realm) || !reader.U32(node.Build) || !node.Build ||
             !reader.U32(node.Capacity) || !reader.U32(node.Capabilities) || !reader.End()) return false;
         node.Type = Service(type);
         node.Realms.clear();
         if (node.Type == Service::World) node.Realms.push_back(node.Realm);
-        return ((node.Type == Service::Auth || node.Type == Service::Map || node.Type == Service::Character || node.Type == Service::Chat) && node.Realm == 0) || (node.Type == Service::World && node.Realm != 0);
+        return ((node.Type == Service::Auth || node.Type == Service::Map || node.Type == Service::Character || node.Type == Service::Chat || node.Type == Service::Battleground) && node.Realm == 0) || (node.Type == Service::World && node.Realm != 0);
     }
     inline bool DecodeRealms(std::vector<std::uint8_t> const& bytes, std::vector<std::uint32_t>& realms)
     {

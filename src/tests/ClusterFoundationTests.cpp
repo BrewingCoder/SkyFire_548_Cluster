@@ -25,6 +25,20 @@ namespace
 int main()
 {
     bool ok = true;
+    Writer bgRegistration;
+    bgRegistration.String("bg-1"); bgRegistration.String("Battleground"); bgRegistration.U8(6);
+    bgRegistration.String("127.0.0.1"); bgRegistration.U16(54950); bgRegistration.U32(0);
+    bgRegistration.U32(18414); bgRegistration.U32(100); bgRegistration.U32(4096);
+    Node bg;
+    ok &= Check(DecodeRegistration(bgRegistration.Bytes,bg) && bg.Type == Service::Battleground,"Battleground registration rejected");
+    Registry bgRegistry; bgRegistry.Register(bg,40,0,100);
+    BattlegroundMetrics bgMetrics; bgMetrics.QueuedPlayers = 10; bgMetrics.Realms = {1,2};
+    ok &= Check(!bgRegistry.SetBattlegroundMetrics(bg.Key,41,1,bgMetrics) &&
+        bgRegistry.SetBattlegroundMetrics(bg.Key,40,2,bgMetrics) &&
+        !bgRegistry.SetBattlegroundMetrics(bg.Key,40,100,bgMetrics),"Battleground metrics owner/lease fencing failed");
+    Node wrongRole = bg; wrongRole.Key = "world-bg"; wrongRole.Type = Service::World;
+    bgRegistry.Register(wrongRole,41,3,100);
+    ok &= Check(!bgRegistry.SetBattlegroundMetrics(wrongRole.Key,41,4,bgMetrics),"World accepted battleground metrics");
     Writer characterMetrics; characterMetrics.U8(1);
     for (unsigned value : {10u,500u,64u,20u,2u,10u,8u,3u,2u,1u,1500u,4u,1u}) characterMetrics.U32(value);
     CharacterMetrics metrics;

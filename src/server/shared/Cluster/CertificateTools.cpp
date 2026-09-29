@@ -132,7 +132,7 @@ namespace Skyfire::Certificates
     int Role(X509* certificate)
     {
         char value[32]{}; int n = X509_NAME_get_text_by_NID(X509_get_subject_name(certificate), NID_organizationalUnitName, value, sizeof(value));
-        return n == 14 && std::string(value, 13) == "SkyFire-role-" && value[13] >= '1' && value[13] <= '5' ? value[13]-'0' : 0;
+        return n == 14 && std::string(value, 13) == "SkyFire-role-" && value[13] >= '1' && value[13] <= '6' ? value[13]-'0' : 0;
     }
     std::int64_t Expires(X509* certificate)
     {

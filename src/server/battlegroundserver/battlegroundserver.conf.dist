@@ -1,0 +1,28 @@
+# This file is part of Project SkyFire https://www.projectskyfire.org.
+# See LICENSE.md file for Copyright information
+[battlegroundserver]
+ConfVersion = 2026092900
+Battleground.BindIP = "127.0.0.1"
+Battleground.Port = 54950
+Battleground.MaxConnections = 32
+Battleground.RequestTimeout = 5
+Battleground.Realms = "1"
+Battleground.AllowedWorlds = "skyfire-world-primary skyfire-world-standby"
+Battleground.WorldRealms = "skyfire-world-primary=1 skyfire-world-standby=1"
+
+Cluster.Enable = 1
+Cluster.NodeKey = "skyfire-battleground-primary"
+Cluster.NodeName = "Battleground matchmaking"
+Cluster.HubHost = "127.0.0.1"
+Cluster.HubPort = 9100
+Cluster.AdvertiseAddress = "127.0.0.1"
+Cluster.Certificate = "certificates/skyfire-battleground-primary.pem"
+Cluster.PrivateKey = "certificates/skyfire-battleground-primary.key"
+Cluster.CA = "certificates/ca.pem"
+Cluster.CRL = ""
+Cluster.Handoff.Enable = 0
+Cluster.RealmDirectory.Enable = 0
+LogsDir = ""
+Appender.Console = 1,3,0
+Appender.File = 2,3,0,battlegroundserver.log,w
+Logger.root = 3,Console File

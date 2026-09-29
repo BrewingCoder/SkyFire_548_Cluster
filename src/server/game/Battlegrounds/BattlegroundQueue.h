@@ -10,6 +10,8 @@
 #include "Common.h"
 #include "DBCEnums.h"
 #include "EventProcessor.h"
+#include "Cluster/BattlegroundClient.h"
+#include <chrono>
 
 #include <deque>
 
@@ -28,6 +30,7 @@ struct PlayerQueueInfo                                      // stores informatio
 struct GroupQueueInfo                                       // stores information about the group in queue (also used when joined as solo!)
 {
     std::map<uint64, PlayerQueueInfo*> Players;             // player queue info map
+    uint64 RemoteId = 0;
     uint32  Team;                                           // Player team (ALLIANCE/HORDE)
     BattlegroundTypeId BgTypeId;                            // battleground type id
     bool    IsRated;                                        // rated
@@ -60,6 +63,8 @@ public:
 
     void BattlegroundQueueUpdate(uint32 diff, BattlegroundTypeId bgTypeId, BattlegroundBracketId bracket_id, uint8 arenaType = 0, bool isRated = false, uint32 minRating = 0);
     void UpdateEvents(uint32 diff);
+    void UpdateRemoteQueues();
+    void HandleRemoteResult(Skyfire::BattlegroundService::Result const& result);
 
     void FillPlayersToBG(Battleground* bg, BattlegroundBracketId bracket_id);
     bool CheckPremadeMatch(BattlegroundBracketId bracket_id, uint32 MinPlayersPerTeam, uint32 MaxPlayersPerTeam);
@@ -109,6 +114,15 @@ public:
     uint32 GetPlayersInQueue(TeamId id);
 
 private:
+    struct RemoteContext
+    {
+        uint64 Pending = 0;
+        std::chrono::steady_clock::time_point Submitted{}, Next{};
+    };
+    std::map<std::pair<uint32,uint8>,RemoteContext> m_RemoteContexts;
+    uint64 m_NextRemoteId = 0;
+    bool EligibleRemoteGroup(GroupQueueInfo const& group, BattlegroundTypeId type, BattlegroundBracketId bracket) const;
+    void SubmitRemoteQueue(BattlegroundTypeId type, BattlegroundBracketId bracket);
     bool InviteGroupToBG(GroupQueueInfo* ginfo, Battleground* bg, uint32 side);
     uint32 m_WaitTimes[BG_TEAMS_COUNT][MAX_BATTLEGROUND_BRACKETS][COUNT_OF_PLAYERS_TO_AVERAGE_WAIT_TIME];
     uint32 m_WaitTimeLastPlayer[BG_TEAMS_COUNT][MAX_BATTLEGROUND_BRACKETS];

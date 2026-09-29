@@ -15,6 +15,7 @@ namespace Skyfire::Cluster
         bool Ready = false;
         std::uint32_t Load = 0;
         ChatMetrics Chat{};
+        BattlegroundMetrics Battleground{};
     };
     struct AgentOptions
     {

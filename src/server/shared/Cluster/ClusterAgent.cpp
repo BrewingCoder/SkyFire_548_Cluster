@@ -6,6 +6,7 @@
 #include "CertificateTools.h"
 #include <ctime>
 #include "ChatProtocol.h"
+#include "BattlegroundProtocol.h"
 #include "HandoffClient.h"
 #include "RealmDirectory.h"
 #include "Configuration/Config.h"
@@ -270,6 +271,9 @@ namespace Skyfire::Cluster
             if (Pending == Message::Register || Pending == Message::Realms) { Publish(true); return; }
             if (Pending == Message::Ready || Pending == Message::Heartbeat) Owner.Registered = true;
             Owner.Backoff = 1;
+            if (Owner.Options.Advertisement.Type == Service::Battleground &&
+                (Pending == Message::Ready || Pending == Message::Heartbeat))
+            { Send(BattlegroundService::MetricsType, BattlegroundService::EncodeMetrics(Owner.Sample().Battleground)); return; }
             if (Owner.Options.Advertisement.Type == Service::Chat &&
                 (Pending == Message::Ready || Pending == Message::Heartbeat))
             { Send(Chat::MetricsType, Chat::EncodeMetrics(Owner.Sample().Chat)); return; }
