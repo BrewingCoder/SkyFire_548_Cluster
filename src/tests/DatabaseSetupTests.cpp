@@ -121,6 +121,89 @@ namespace
         return passed;
     }
 
+    bool TestPromotedHubUpdates()
+    {
+        using namespace Skyfire::Database;
+        auto options = MakeHubDatabaseSetupOptions(true, false, false, "sql");
+        std::vector<SqlUpdateFile> updates =
+        {
+            { "2026_09_30_hub_00.sql", "sql/updates/hub/2026_09_30_hub_00.sql", "handoff", "001_durable_handoffs.sql" },
+            { "2026_09_30_hub_01.sql", "sql/updates/hub/2026_09_30_hub_01.sql", "restart", "002_node_restarts.sql" },
+            { "2026_09_30_hub_02.sql", "sql/updates/hub/2026_09_30_hub_02.sql", "managed", "003_managed_data_services.sql" }
+        };
+        SetupState state;
+        state.DatabaseExists = true;
+        auto fresh = BuildHubDatabaseSetupPlan(options, state, true, updates);
+        bool passed = Expect(fresh.IsValid() && fresh.BaselineUpdates.size() == 2 &&
+            fresh.PendingUpdates.size() == 1 && fresh.PendingUpdates[0].Name == updates[0].Name,
+            "Fresh hub must skip rolled-up columns but create handoff tables");
+        state.SchemaTableCount = 20;
+        state.UpdateTrackingExists = true;
+        passed &= Expect(BuildHubDatabaseSetupPlan(options, state, false, updates).PendingUpdates.size() == 3,
+            "Existing tracked hub must apply all three missing releases");
+        for (auto const& update : updates)
+        {
+            state.AppliedUpdates.insert(update.PendingName);
+            state.AppliedUpdateHashes[update.PendingName] = update.Hash;
+        }
+        auto promoted = BuildHubDatabaseSetupPlan(options, state, false, updates);
+        passed &= Expect(promoted.IsValid() && promoted.PendingUpdates.empty() && promoted.PromotedUpdates.size() == 3,
+            "Applied pending updates must only record the released names");
+        state.AppliedUpdateHashes.erase(updates[0].PendingName);
+        passed &= Expect(!BuildHubDatabaseSetupPlan(options, state, false, updates).IsValid(),
+            "Promotion cannot trust an unverified pending update");
+        state.AppliedUpdateHashes[updates[0].PendingName] = "edited";
+        options.AllowUpdateHashMismatch = true;
+        passed &= Expect(!BuildHubDatabaseSetupPlan(options, state, false, updates).IsValid(),
+            "Hash override must not authorize mismatched promotion identity");
+        state.AppliedUpdateHashes[updates[0].PendingName] = updates[0].Hash;
+        for (auto const& update : updates)
+        {
+            state.AppliedUpdates.insert(update.Name);
+            state.AppliedUpdateHashes[update.Name] = update.Hash;
+        }
+        auto again = BuildHubDatabaseSetupPlan(options, state, false, updates);
+        passed &= Expect(again.IsValid() && again.PendingUpdates.empty() && again.PromotedUpdates.empty(),
+            "A second startup must not reconcile or apply releases again");
+        return passed;
+    }
+
+    bool TestPromotionDiscovery()
+    {
+        using namespace Skyfire::Database;
+        auto root = std::filesystem::temp_directory_path() / "skyfire_sql_promotion_test";
+        if (!std::filesystem::create_directory(root))
+            return Expect(false, "Promotion fixture already exists");
+        std::filesystem::create_directories(root / "updates/hub");
+        std::filesystem::create_directories(root / "pending_updates/hub");
+        auto released = root / "updates/hub/2026_09_30_hub_00.sql";
+        auto alias = released.string() + ".pending-name";
+        auto pending = root / "pending_updates/hub/001_old.sql";
+        std::ofstream(released) << "SELECT 1;";
+        std::ofstream(alias) << "001_old.sql\n";
+        std::ofstream(pending) << "SELECT 1;";
+        std::ofstream(root / "pending_updates/hub/002_next.sql") << "SELECT 2;";
+        auto options = MakeHubDatabaseSetupOptions(false, false, false, root.string());
+        auto updates = DiscoverSqlUpdates(options);
+        bool passed = Expect(updates.size() == 1 && updates[0].PendingName == "001_old.sql",
+            "Released promotion metadata must load without pending imports enabled");
+        options.ImportPendingUpdates = true;
+        updates = DiscoverSqlUpdates(options);
+        passed &= Expect(updates.size() == 2 && updates[0].Name == released.filename().string() &&
+            updates[1].Name == "002_next.sql", "Stale installed pending copies must be skipped; releases run first");
+        std::ofstream(pending) << "SELECT 99;";
+        bool rejected = false;
+        try { DiscoverSqlUpdates(options); } catch (std::exception const&) { rejected = true; }
+        passed &= Expect(rejected, "Conflicting installed pending copy must stop discovery");
+        options.ImportPendingUpdates = false;
+        std::ofstream(alias) << "../001_old.sql";
+        rejected = false;
+        try { DiscoverSqlUpdates(options); } catch (std::exception const&) { rejected = true; }
+        passed &= Expect(rejected, "Promotion identity must be a filename, not a path");
+        std::filesystem::remove_all(root);
+        return passed;
+    }
+
     bool TestAuthDefaultsAreConservative()
     {
         Skyfire::Database::SetupOptions options = Skyfire::Database::MakeAuthDatabaseSetupOptions(false, false, "");
@@ -898,15 +981,15 @@ namespace
         bool passed = true;
         passed &= ExpectEqual(
             Skyfire::Database::BuildSetupPlanSummary("Auth", updatePlan, 2, false),
-            "Auth database setup plan: mode=apply-updates, discovered updates=2, pending updates=1, baseline updates=0, hash mismatch bypasses=0, install base=no, required SQL=no.",
+            "Auth database setup plan: mode=apply-updates, discovered updates=2, pending updates=1, baseline updates=0, promoted updates=0, hash mismatch bypasses=0, install base=no, required SQL=no.",
             "Setup plan summary should describe pending update mode");
         passed &= ExpectEqual(
             Skyfire::Database::BuildSetupPlanSummary("World", worldInstallPlan, 3, true),
-            "World database setup plan: mode=install-base, discovered updates=3, pending updates=1, baseline updates=0, hash mismatch bypasses=0, install base=yes, required SQL=yes.",
+            "World database setup plan: mode=install-base, discovered updates=3, pending updates=1, baseline updates=0, promoted updates=0, hash mismatch bypasses=0, install base=yes, required SQL=yes.",
             "Setup plan summary should describe base install mode and required SQL");
         passed &= ExpectEqual(
             Skyfire::Database::BuildSetupPlanSummary("Character", baselinePlan, 1, false),
-            "Character database setup plan: mode=baseline, discovered updates=1, pending updates=0, baseline updates=1, hash mismatch bypasses=0, install base=no, required SQL=no.",
+            "Character database setup plan: mode=baseline, discovered updates=1, pending updates=0, baseline updates=1, promoted updates=0, hash mismatch bypasses=0, install base=no, required SQL=no.",
             "Setup plan summary should describe baseline mode");
 
         return passed;
@@ -919,6 +1002,8 @@ int main()
 
     passed &= TestHubSetupAndUpgradePlans();
     passed &= TestHubPendingDiscoveryOrder();
+    passed &= TestPromotedHubUpdates();
+    passed &= TestPromotionDiscovery();
     passed &= TestAuthDefaultsAreConservative();
     passed &= TestCharacterDefaultsAreConservative();
     passed &= TestWorldDefaultsAreConservative();

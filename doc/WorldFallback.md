@@ -66,7 +66,7 @@ session migration. A missed heartbeat never authorizes takeover.
 
 The feature reuses durable restart maintenance in `hub_backup_worker`; no new SQL
 is needed if coordinated node restart already works. Older hub databases need
-`sql/pending_updates/hub/002_node_restarts.sql` if `restart_owner` is absent.
+`sql/updates/hub/2026_09_30_hub_01.sql` if `restart_owner` is absent.
 Do not replay that ALTER on a fresh base which already contains the column.
 
 ## Planned promotion

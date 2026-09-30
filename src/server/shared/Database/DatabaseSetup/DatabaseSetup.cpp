@@ -13,6 +13,7 @@
 #include <iomanip>
 #include <set>
 #include <sstream>
+#include <stdexcept>
 #include <utility>
 
 namespace Skyfire
@@ -221,7 +222,8 @@ namespace Database
             "2026_09_18_hub_00.sql", "2026_09_18_hub_01.sql",
             "2026_09_18_hub_02.sql", "2026_09_18_hub_03.sql",
             "2026_09_19_hub_00.sql", "2026_09_19_hub_01.sql",
-            "2026_09_19_hub_02.sql"
+            "2026_09_19_hub_02.sql",
+            "2026_09_30_hub_01.sql", "2026_09_30_hub_02.sql"
         };
         plan.PendingUpdates.clear();
         for (SqlUpdateFile const& update : updates)
@@ -361,6 +363,24 @@ namespace Database
         std::vector<SqlUpdateFile> updates =
             discoverFromDirectory(std::filesystem::path(options.SqlPath) / options.UpdatesDirectory);
 
+        // Promotion preserves the SQL bytes and carries the original tracking name
+        // alongside the release. Never infer identity from matching SQL alone.
+        std::map<std::string, std::string> promotedNames;
+        for (SqlUpdateFile& update : updates)
+        {
+            std::filesystem::path aliasPath(update.Path + ".pending-name");
+            if (!std::filesystem::exists(aliasPath))
+                continue;
+            std::string name;
+            if (!ReadTextFile(aliasPath, name))
+                throw std::runtime_error("Cannot read SQL promotion metadata: " + aliasPath.string());
+            name = Trim(name);
+            if (!EndsWithSqlExtension(name) || name.find_first_of("/\\\r\n\t") != std::string::npos ||
+                name == update.Name || !promotedNames.emplace(name, update.Hash).second)
+                throw std::runtime_error("Invalid or duplicate SQL promotion identity: " + aliasPath.string());
+            update.PendingName = name;
+        }
+
         if (!options.ImportPendingUpdates || options.PendingUpdatesDirectory.empty())
             return updates;
 
@@ -375,16 +395,18 @@ namespace Database
 
         for (SqlUpdateFile& update : pendingUpdates)
         {
+            auto promoted = promotedNames.find(update.Name);
+            if (promoted != promotedNames.end())
+            {
+                if (update.Hash.empty() || promoted->second != update.Hash)
+                    throw std::runtime_error("Pending SQL differs from its promoted release: " + update.Name);
+                continue; // INSTALL may leave the old pending copy behind.
+            }
             if (!knownNames.insert(update.Name).second)
                 continue;
 
             updates.push_back(std::move(update));
         }
-
-        std::sort(updates.begin(), updates.end(), [](SqlUpdateFile const& left, SqlUpdateFile const& right)
-        {
-            return left.Name < right.Name;
-        });
 
         return updates;
     }
@@ -595,6 +617,7 @@ namespace Database
             << ", discovered updates=" << discoveredUpdateCount
             << ", pending updates=" << plan.PendingUpdates.size()
             << ", baseline updates=" << plan.BaselineUpdates.size()
+            << ", promoted updates=" << plan.PromotedUpdates.size()
             << ", hash mismatch bypasses=" << plan.HashMismatchedUpdates.size()
             << ", install base=" << (plan.ShouldInstallBase ? "yes" : "no")
             << ", required SQL=" << (appliesRequiredSql ? "yes" : "no")
@@ -670,6 +693,20 @@ namespace Database
         {
             if (state.AppliedUpdates.find(update.Name) == state.AppliedUpdates.end())
             {
+                if (!update.PendingName.empty() && state.AppliedUpdates.count(update.PendingName))
+                {
+                    auto hash = state.AppliedUpdateHashes.find(update.PendingName);
+                    if (update.Hash.empty() || hash == state.AppliedUpdateHashes.end() || hash->second != update.Hash)
+                    {
+                        plan.Error = options.Domain + " promoted update `" + update.Name +
+                            "` does not match the recorded pending update `" + update.PendingName + "`.";
+                        plan.PendingUpdates.clear();
+                        plan.PromotedUpdates.clear();
+                        return plan;
+                    }
+                    plan.PromotedUpdates.push_back(update);
+                    continue;
+                }
                 plan.PendingUpdates.push_back(update);
                 continue;
             }

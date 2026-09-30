@@ -105,7 +105,7 @@ namespace
             SF_LOG_ERROR("server.hub", "%s", plan.Error.c_str());
             return false;
         }
-        if (plan.ShouldInstallBase || plan.ShouldBaselineUpdates || !plan.PendingUpdates.empty())
+        if (plan.ShouldInstallBase || plan.ShouldBaselineUpdates || !plan.PendingUpdates.empty() || !plan.PromotedUpdates.empty())
         {
             bool hasWorker = false;
             bool busy = false;

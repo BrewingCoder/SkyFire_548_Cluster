@@ -54,7 +54,7 @@ For local web Start, Stop, and Restart controls, register providers with the
 [hub process supervisor](ManagedDataServices.md). This preserves offline cards
 and prevents data-service shutdown while a world is still active.
 
-For coordinated world/auth/mapserver refresh while the hub stays online, see [Hub node restarts](HubNodeRestart.md). This optional restart feature adds pending hub migration `002_node_restarts.sql` and requires a one-time external restart of older mapserver daemons after installing the updated script.
+For coordinated world/auth/mapserver refresh while the hub stays online, see [Hub node restarts](HubNodeRestart.md). This optional restart feature uses hub migration `2026_09_30_hub_01.sql` and requires a one-time external restart of older mapserver daemons after installing the updated script.
 
 Every hub-managed world start (console, web, soft restart and backup restart) first reads that node's configuration and checks all assigned providers against the live hub registry. An unavailable, unready, expired, drained, disabled or full provider blocks launch and names the dependency in the error. The world process is not spawned. Start the provider and retry. This uses the latest heartbeat lease, so worldserver additionally verifies discovery, HTTPS access and assets before map initialization to catch failures after preflight. Worlds with map distribution disabled keep their normal startup.
 

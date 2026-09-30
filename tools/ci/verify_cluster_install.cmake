@@ -32,7 +32,13 @@ foreach(asset
     characterserver/character_state.py characterserver/statements.json
     characterserver/characterserver.toml.dist characterserver/requirements.txt
     characterserver/hub_service.py characterserver/cluster_certificates.py
-    sql/base/hub_database.sql)
+    sql/base/hub_database.sql
+    sql/updates/hub/2026_09_30_hub_00.sql
+    sql/updates/hub/2026_09_30_hub_00.sql.pending-name
+    sql/updates/hub/2026_09_30_hub_01.sql
+    sql/updates/hub/2026_09_30_hub_01.sql.pending-name
+    sql/updates/hub/2026_09_30_hub_02.sql
+    sql/updates/hub/2026_09_30_hub_02.sql.pending-name)
   list(APPEND required "${runtime}/${asset}")
 endforeach()
 foreach(path IN LISTS required)

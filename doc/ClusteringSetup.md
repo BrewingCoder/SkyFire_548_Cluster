@@ -81,7 +81,10 @@ only if using that option. Both default off. An empty `SqlPath` disables setup/u
 checks, preserving the existing manual installation behavior.
 
 The current hub base includes the nine released migrations through
-`2026_09_19_hub_02.sql`. A fresh install records those files in `skyfire_db_updates`
+`2026_09_19_hub_02.sql`, plus `2026_09_30_hub_01.sql` (restart ownership) and
+`2026_09_30_hub_02.sql` (managed data services). The handoff tables in
+`2026_09_30_hub_00.sql` still execute on fresh installations.
+A fresh install records included files in `skyfire_db_updates`
 without replaying their DDL, then executes newer releases. That explicit included
 list is maintained in `BuildHubDatabaseSetupPlan`; update it together with any
 future base rollup, never mark arbitrary future updates as included. Existing
@@ -109,16 +112,17 @@ migration before retrying; the updater cannot roll it back automatically.
 
 For staging only, set `HubDatabase.ImportPendingUpdates = 1` to include
 `pending_updates/hub`. See the [pending SQL guide](../sql/pending_updates/README.md)
-for dependency ordering and the limitations of promoting already imported pending
-files. CI and the promotion script have not been modified to accept hub updates yet.
+for dependency ordering and hash-checked recognition of already imported pending
+files. CI promotes all four SQL domains on the `clustering` branch. Install the
+matching binary, released SQL and `.pending-name` files together.
 
 ## Durable handoffs (Phase 9 foundation)
 
 `Hub.Handoff.Store = "database"` selects the shared MySQL handoff store. The default
 `"memory"` preserves the previous behavior. Database mode requires
-`sql/pending_updates/hub/001_durable_handoffs.sql`, applied manually or through the
-opt-in pending updater on staging. It is not in the released update stream yet;
-CI remains unchanged. Do not modify the hub base to include pending features.
+`sql/updates/hub/2026_09_30_hub_00.sql`, applied by the startup updater. Databases
+that tracked `001_durable_handoffs.sql` with the same content hash receive the new
+tracking name without recreating the tables.
 
 The store keeps up to 65,536 tokens with a maximum 900-second TTL. Database UTC
 controls expiry. A singleton InnoDB row serializes mutations across connections;

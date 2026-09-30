@@ -49,6 +49,7 @@ namespace Database
         std::string Name;
         std::string Path;
         std::string Hash;
+        std::string PendingName;
     };
 
     struct SqlStatementContext
@@ -66,6 +67,7 @@ namespace Database
         std::vector<SqlUpdateFile> PendingUpdates;
         std::vector<SqlUpdateFile> BaselineUpdates;
         std::vector<SqlUpdateFile> HashMismatchedUpdates;
+        std::vector<SqlUpdateFile> PromotedUpdates;
         std::string Error;
 
         bool IsValid() const;

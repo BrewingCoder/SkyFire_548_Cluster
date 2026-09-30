@@ -11,8 +11,8 @@ mapserver, and characterserver folders. Both Python folders now include
 `hub_service.py`; characterserver also includes `metrics.py`. Install their existing
 requirements into the Python environment used to launch them.
 
-Apply `sql/pending_updates/hub/003_managed_data_services.sql`, either through the
-hub database updater with pending updates enabled or with the established offline
+Apply `sql/updates/hub/2026_09_30_hub_02.sql`, either through the
+hub database updater or with the established offline
 database update procedure. The migration preserves existing auth/world definitions
 and adds `service_kind` and `cluster_key` to `hub_managed_services`. No CI changes
 are required.

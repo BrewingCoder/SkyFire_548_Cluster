@@ -36,6 +36,13 @@ jobs:
       with:
         fetch-depth: 0
 
+    - name: Test SQL reconciliation and promotion
+      shell: pwsh
+      run: |
+        python tools/dev/tests/reconcile_sql_updates.test.py
+        if ($LASTEXITCODE -ne 0) { throw 'SQL reconciliation tests failed.' }
+        ./tools/dev/tests/promote_pending_updates.test.ps1
+
     - name: Check game source tabs
       shell: pwsh
       run: ./tools/dev/game_metrics.ps1 -CheckNoTabs

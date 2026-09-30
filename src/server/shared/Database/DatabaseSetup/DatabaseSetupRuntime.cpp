@@ -688,6 +688,23 @@ namespace Database
     bool ApplyPendingSetupUpdates(MYSQL* setupConnection, SetupOptions const& options, SetupPlan const& plan,
         SetupRuntimeContext const& context)
     {
+        if (!plan.PromotedUpdates.empty() &&
+            !ExecuteSetupQuery(setupConnection, "START TRANSACTION", "Cannot start promotion tracking", context))
+            return false;
+        for (SqlUpdateFile const& update : plan.PromotedUpdates)
+        {
+            SF_LOG_INFO(context.LogFilter, "Recording promoted %s database update %s (already applied as %s).",
+                context.DatabaseName, update.Name.c_str(), update.PendingName.c_str());
+            if (!RecordAppliedUpdate(setupConnection, options, update, update.Hash, context))
+            {
+                ExecuteSetupQuery(setupConnection, "ROLLBACK", "Cannot roll back promotion tracking", context);
+                return false;
+            }
+        }
+        if (!plan.PromotedUpdates.empty() &&
+            !ExecuteSetupQuery(setupConnection, "COMMIT", "Cannot commit promotion tracking", context))
+            return false;
+
         for (SqlUpdateFile const& update : plan.PendingUpdates)
         {
             std::string updateSql;

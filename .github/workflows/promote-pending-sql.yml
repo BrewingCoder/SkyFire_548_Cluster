@@ -2,22 +2,28 @@ name: promote-pending-sql
 
 on:
   workflow_dispatch:
+    inputs:
+      base_ref:
+        description: Clustering commit before the upstream merge (HEAD for pending-only promotion)
+        required: true
+        default: HEAD
   push:
-    branches: [ main ]
+    branches: [ clustering ]
     paths:
       - 'sql/pending_updates/*.sql'
       - 'sql/pending_updates/**/*.sql'
+      - 'sql/updates/**/*.sql'
 
 permissions:
   contents: write
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   promote:
-    if: github.actor != 'github-actions[bot]' && github.ref == 'refs/heads/main'
+    if: github.actor != 'github-actions[bot]' && github.ref == 'refs/heads/clustering'
     runs-on: windows-latest
 
     steps:
@@ -27,6 +33,13 @@ jobs:
           ref: ${{ github.ref_name }}
           token: ${{ secrets.AUTOMATION_PAT || github.token }}
 
+      - name: Test SQL reconciliation and promotion
+        shell: pwsh
+        run: |
+          python tools/dev/tests/reconcile_sql_updates.test.py
+          if ($LASTEXITCODE -ne 0) { throw 'SQL reconciliation tests failed.' }
+          ./tools/dev/tests/promote_pending_updates.test.ps1
+
       - name: Import and commit pending SQL
         id: import-pending
         shell: pwsh
@@ -35,6 +48,10 @@ jobs:
           git config --local user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
           git pull --rebase origin "${{ github.ref_name }}"
+          if ($LASTEXITCODE -ne 0) { throw 'Could not refresh clustering branch.' }
+
+          python ./tools/dev/reconcile_sql_updates.py --base-ref "$env:SQL_BASE_REF" --apply
+          if ($LASTEXITCODE -ne 0) { throw 'SQL collision reconciliation failed.' }
 
           $pendingFiles = Get-ChildItem -Path sql/pending_updates -Filter *.sql -File -Recurse
           $invalidFiles = @()
@@ -43,7 +60,7 @@ jobs:
             $relativeParts = $relativePath.Split('/')
             $databaseName = if ($relativeParts.Count -ge 3) { $relativeParts[2] } else { '' }
 
-            if ($relativeParts.Count -ne 4 -or $relativeParts[0] -ne 'sql' -or $relativeParts[1] -ne 'pending_updates' -or $databaseName -notin @('auth', 'characters', 'world')) {
+            if ($relativeParts.Count -ne 4 -or $relativeParts[0] -ne 'sql' -or $relativeParts[1] -ne 'pending_updates' -or $databaseName -notin @('auth', 'characters', 'world', 'hub')) {
               $invalidFiles += $relativePath
             }
           }
@@ -55,7 +72,7 @@ jobs:
           ./tools/dev/promote_pending_updates.ps1 -Apply
           git add -A sql/pending_updates sql/updates
 
-          $changes = git status --porcelain
+          $changes = git diff --cached --name-only
           $status = $changes -join "`n"
           Write-Host $status
 
@@ -66,7 +83,10 @@ jobs:
           }
 
           git commit -m "SQL: Promote pending updates" -m "Referenced commit(s): $env:GITHUB_SHA"
+          if ($LASTEXITCODE -ne 0) { throw 'Could not commit SQL promotion.' }
           "has_changes=true" >> $env:GITHUB_OUTPUT
+        env:
+          SQL_BASE_REF: ${{ github.event_name == 'workflow_dispatch' && inputs.base_ref || github.event.before }}
 
       - name: Push promoted SQL
         if: steps.import-pending.outputs.has_changes == 'true'

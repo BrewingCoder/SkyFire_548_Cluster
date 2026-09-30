@@ -25,7 +25,7 @@ param(
 
     [string] $PromotionDate = '',
 
-    [ValidateSet('auth', 'characters', 'world')]
+    [ValidateSet('auth', 'characters', 'world', 'hub')]
     [string[]] $Database,
 
     [string[]] $InputPath,
@@ -35,8 +35,8 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
-$ValidDatabases = @('auth', 'characters', 'world')
-$UpdateNamePattern = '^(?<date>\d{4}_\d{2}_\d{2})_(?<database>auth|characters|world)_(?<sequence>\d{2})(?<suffix>.*)\.sql$'
+$ValidDatabases = @('auth', 'characters', 'world', 'hub')
+$UpdateNamePattern = '^(?<date>\d{4}_\d{2}_\d{2})_(?<database>auth|characters|world|hub)_(?<sequence>\d{2})(?<suffix>.*)\.sql$'
 
 function Resolve-PromotionDate {
     param([string] $RequestedDate)
@@ -237,10 +237,20 @@ function New-PromotionPlan {
         $updatesDir = Join-Path $RootPath "sql\updates\$($first.Database)"
 
         foreach ($info in ($group.Group | Sort-Object { $_.Source.Name })) {
+            if ($nextSequence -gt 99) {
+                throw "No two-digit update sequence remains for $DateText/$($info.Database)."
+            }
+            if (Test-Path -LiteralPath $updatesDir) {
+                foreach ($alias in (Get-ChildItem -LiteralPath $updatesDir -Filter '*.sql.pending-name' -File)) {
+                    if ([System.IO.File]::ReadAllText($alias.FullName).Trim() -eq $info.Source.Name) {
+                        throw "Pending filename '$($info.Source.Name)' was already promoted. Use a unique name."
+                    }
+                }
+            }
             $targetName = '{0}_{1}_{2:D2}.sql' -f $DateText, $info.Database, $nextSequence
             $targetPath = Join-Path $updatesDir $targetName
 
-            if (Test-Path -LiteralPath $targetPath) {
+            if ((Test-Path -LiteralPath $targetPath) -or (Test-Path -LiteralPath "$targetPath.pending-name")) {
                 throw "Target update already exists: $(Convert-ToRepoPath -Path $targetPath -RootPath $RootPath)"
             }
 
@@ -280,6 +290,14 @@ function Invoke-PromotionPlan {
 
         if ($PSCmdlet.ShouldProcess($targetRelative, "Promote pending SQL update from $sourceRelative")) {
             Move-Item -LiteralPath $action.Source -Destination $action.Target
+            try {
+                [System.IO.File]::WriteAllText("$($action.Target).pending-name",
+                    (Split-Path -Leaf $action.Source) + "`n", [System.Text.UTF8Encoding]::new($false))
+            }
+            catch {
+                Move-Item -LiteralPath $action.Target -Destination $action.Source
+                throw
+            }
             Write-Host "PROMOTED: $sourceRelative -> $targetRelative"
         }
     }

@@ -4,7 +4,7 @@ The global status sidebar provides **Restart all** for operators with service-op
 
 ## Installation
 
-Build and INSTALL the updated hub and web assets, and deploy the updated `mapserver/mapserver.py`. Apply `sql/pending_updates/hub/002_node_restarts.sql` through the hub pending-update workflow for an existing database. The base schema includes this change for fresh installations. Preserve operator-owned configuration files.
+Build and INSTALL the updated hub and web assets, and deploy the updated `mapserver/mapserver.py`. The hub startup updater applies `sql/updates/hub/2026_09_30_hub_01.sql` to existing databases. The base schema includes this change for fresh installations. Preserve operator-owned configuration files.
 
 Existing mapserver processes must be restarted once through their OS service/launcher after deployment to load restart support. Copying the script or compiling native servers does not refresh a running Python process. Restart all rejects older mapservers before sending any world shutdown command. Once upgraded, mapserver cards also expose an individual **Restart** action.
 
