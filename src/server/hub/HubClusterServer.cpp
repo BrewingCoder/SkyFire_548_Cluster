@@ -109,6 +109,7 @@ private:
                 self->_header.Type != Handoff::RequestType && self->_header.Type != Realms::RequestType &&
                 self->_header.Type != MapData::RequestType && self->_header.Type != MapData::MetricsType &&
                 self->_header.Type != CharacterMetricsType && self->_header.Type != Skyfire::Chat::MetricsType &&
+                self->_header.Type != Skyfire::BattlegroundService::MetricsType &&
                 self->_header.Type != Message::Enroll && self->_header.Type != Message::Revocations && self->_header.Type != Message::Renew)
             { self->Reject(Error::Malformed, "Unsupported request type."); return; }
             self->_body.resize(self->_header.Length);
