@@ -3,10 +3,17 @@
 </p>
 
 ## Build Status
-[![windows-build](https://github.com/ProjectSkyfire/SkyFire_548/actions/workflows/windows.yml/badge.svg)](https://github.com/ProjectSkyfire/SkyFire_548/actions/workflows/windows.yml)
-[![ubuntu-build](https://github.com/ProjectSkyfire/SkyFire_548/actions/workflows/ubuntu.yml/badge.svg)](https://github.com/ProjectSkyfire/SkyFire_548/actions/workflows/ubuntu.yml)
+[![windows-cluster-build](https://github.com/ProjectSkyfire/SkyFire_548_Cluster/actions/workflows/windows.yml/badge.svg)](https://github.com/ProjectSkyfire/SkyFire_548_Cluster/actions/workflows/windows.yml)
+[![ubuntu-cluster-build](https://github.com/ProjectSkyfire/SkyFire_548_Cluster/actions/workflows/ubuntu.yml/badge.svg)](https://github.com/ProjectSkyfire/SkyFire_548_Cluster/actions/workflows/ubuntu.yml)
 [![CodeFactor](https://www.codefactor.io/repository/github/projectskyfire/skyfire_548/badge)](https://www.codefactor.io/repository/github/projectskyfire/skyfire_548)
 [![Codacy Badge](https://app.codacy.com/project/badge/Grade/57a11392c3ed42dcae439669e893565f)](https://app.codacy.com/gh/ProjectSkyfire/SkyFire_548/dashboard?utm_source=gh&utm_medium=referral&utm_content=&utm_campaign=Badge_grade)
+
+Clustering CI runs on pushes and pull requests to `clustering`, `main` and `trunk`,
+including SQL changes. Windows and Ubuntu builds verify the CMake INSTALL layout
+and upload packages under each workflow run. Ubuntu PCH CI also runs focused
+cluster, hub, chat and battleground tests. Packages include native daemons, web
+assets, Python services and distribution configs; operators still supply their
+runtime dependencies, databases, certificates and game data.
 
 ## Project Information
 SkyFire is a *MMORPG* Framework based mostly on C++.

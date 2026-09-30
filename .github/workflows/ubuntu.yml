@@ -1,15 +1,14 @@
-name: ubuntu-build
+name: ubuntu-cluster-build
 
 on:
   workflow_dispatch:
   push:
-    branches: [ main, trunk ]
-    paths-ignore:
-      - 'sql/**'
+    branches: [ clustering, main, trunk ]
   pull_request:
-    branches: [ main, trunk ]
-    paths-ignore:
-      - 'sql/**'
+    branches: [ clustering, main, trunk ]
+
+permissions:
+  contents: read
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
@@ -23,6 +22,7 @@ env:
   BOOST_ROOT: ${{ github.workspace }}/.deps/boost_1_91_0
   OPENSSL_ROOT_DIR: ${{ github.workspace }}/.deps/openssl-4.0.0
   BUILD_DIR: ${{ github.workspace }}/build/ubuntu
+  INSTALL_DIR: ${{ github.workspace }}/artifacts/cluster-ubuntu
   ELUNA_BUILD_DIR: ${{ github.workspace }}/build/ubuntu-eluna
   ELUNA_INSTALL_DIR: ${{ github.workspace }}/build/ubuntu-eluna-install
   CCACHE_DIR: ${{ github.workspace }}/.ccache
@@ -36,6 +36,8 @@ jobs:
 
     steps:
     - uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
 
     - name: Check game source tabs
       shell: pwsh
@@ -136,10 +138,13 @@ jobs:
         set -euo pipefail
         cmake -S "$GITHUB_WORKSPACE" -B "$BUILD_DIR" -G Ninja \
           -DCMAKE_BUILD_TYPE="$BUILD_TYPE" \
+          -DCMAKE_INSTALL_PREFIX="$INSTALL_DIR" \
+          -DCONF_DIR="$INSTALL_DIR/etc" \
           -DCMAKE_C_COMPILER="$CC" \
           -DCMAKE_CXX_COMPILER="$CXX" \
           -DCMAKE_C_COMPILER_LAUNCHER=ccache \
           -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+          -DSERVERS=ON \
           -DTOOLS=ON \
           -DPACKET_LOG_SERVER=ON \
           -DUSE_COREPCH=ON \
@@ -154,6 +159,22 @@ jobs:
         set -euo pipefail
         cmake --build "$BUILD_DIR" --parallel "$(nproc)"
 
+    - name: Install and verify clustering package
+      shell: bash
+      run: |
+        set -euo pipefail
+        cmake --install "$BUILD_DIR"
+        cmake -DINSTALL_ROOT="$INSTALL_DIR" -DPACKAGE_PLATFORM=linux -P tools/ci/verify_cluster_install.cmake
+        tar -C "$INSTALL_DIR" -czf "$RUNNER_TEMP/SkyFire_548_Cluster-ubuntu.tar.gz" .
+
+    - name: Upload Ubuntu clustering package
+      uses: actions/upload-artifact@v4
+      with:
+        name: SkyFire_548_Cluster-ubuntu-${{ github.sha }}
+        path: ${{ runner.temp }}/SkyFire_548_Cluster-ubuntu.tar.gz
+        if-no-files-found: error
+        retention-days: 7
+
     - name: Configure Eluna smoke
       shell: bash
       run: |
@@ -166,6 +187,7 @@ jobs:
           -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
           -DCMAKE_INSTALL_PREFIX="$ELUNA_INSTALL_DIR" \
           -DCONF_DIR="$ELUNA_INSTALL_DIR/etc" \
+          -DSERVERS=ON \
           -DTOOLS=OFF \
           -DPACKET_LOG_SERVER=OFF \
           -DUSE_COREPCH=ON \
@@ -179,7 +201,7 @@ jobs:
       shell: bash
       run: |
         set -euo pipefail
-        cmake --build "$ELUNA_BUILD_DIR" --target authserver worldserver --parallel "$(nproc)"
+        cmake --build "$ELUNA_BUILD_DIR" --target authserver worldserver hubserver chatserver battlegroundserver --parallel "$(nproc)"
 
     - name: Install Eluna smoke
       shell: bash

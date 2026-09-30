@@ -1,16 +1,15 @@
-name: windows-build
+name: windows-cluster-build
 
 on:
   workflow_dispatch:
   push:
-    branches: [ main, trunk ]
-    paths-ignore:
-      - 'sql/**'
+    branches: [ clustering, main, trunk ]
   pull_request:
-    branches: [ main, trunk ]
-    paths-ignore:
-      - 'sql/**'
+    branches: [ clustering, main, trunk ]
       
+permissions:
+  contents: read
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -26,6 +25,7 @@ env:
   OPENSSL_LIB_LEGACY: C:\Program Files\OpenSSL\lib\VC\x64\MD\liblegacy.lib
   REPO_DIR: ${{ github.workspace }}
   BUILD_DIR: ${{ github.workspace }}\bin\builddir
+  INSTALL_DIR: ${{ github.workspace }}\artifacts\cluster-windows
     
 jobs:
   build:
@@ -33,8 +33,8 @@ jobs:
     
     steps:
     - uses: actions/checkout@v4
-
-    - uses: FranzDiebold/github-env-vars-action@v2
+      with:
+        fetch-depth: 0
 
     - name: Check game source tabs
       shell: pwsh
@@ -43,7 +43,6 @@ jobs:
     - name: Create Build Environment
       shell: pwsh
       run: |
-        "ARCHIVE_FILENAME=$env:CI_REPOSITORY_NAME-$env:CI_SHA_SHORT.zip" >> $env:GITHUB_ENV
         cmake -E make_directory ${{ env.BUILD_DIR }}
 
     - name: windows dependencies
@@ -102,6 +101,8 @@ jobs:
       run: |
         cmake -S "$env:GITHUB_WORKSPACE" -B "$env:BUILD_DIR" `
           -A x64 `
+          -DCMAKE_INSTALL_PREFIX="$env:INSTALL_DIR" `
+          -DSERVERS=ON `
           -DTOOLS=ON `
           -DPACKET_LOG_SERVER=ON `
           -DUSE_COREPCH=ON `
@@ -115,8 +116,18 @@ jobs:
       run: |
         cmake --build "$env:BUILD_DIR" --config "$env:BUILD_TYPE" --parallel 4
 
-    - name: Create Upload File Name
+    - name: Install and verify clustering package
       shell: pwsh
       run: |
-        "ARCHIVE_FILENAME=${{ github.event.repository.name }}-$(git rev-parse --short HEAD).zip" >> $env:GITHUB_ENV
-      
+        cmake --install "$env:BUILD_DIR" --config "$env:BUILD_TYPE"
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        cmake "-DINSTALL_ROOT=$env:INSTALL_DIR" -DPACKAGE_PLATFORM=windows -P tools/ci/verify_cluster_install.cmake
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+    - name: Upload Windows clustering package
+      uses: actions/upload-artifact@v4
+      with:
+        name: SkyFire_548_Cluster-windows-${{ github.sha }}
+        path: ${{ env.INSTALL_DIR }}/
+        if-no-files-found: error
+        retention-days: 7

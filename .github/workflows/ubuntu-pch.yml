@@ -1,15 +1,14 @@
-name: ubuntu-pch-smoke
+name: ubuntu-cluster-pch-smoke
 
 on:
   workflow_dispatch:
   push:
-    branches: [ main, trunk ]
-    paths-ignore:
-      - 'sql/**'
+    branches: [ clustering, main, trunk ]
   pull_request:
-    branches: [ main, trunk ]
-    paths-ignore:
-      - 'sql/**'
+    branches: [ clustering, main, trunk ]
+
+permissions:
+  contents: read
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
@@ -34,6 +33,8 @@ jobs:
 
     steps:
     - uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
 
     - name: Check game source tabs
       shell: pwsh
@@ -138,6 +139,10 @@ jobs:
           -DCMAKE_CXX_COMPILER="$CXX" \
           -DCMAKE_C_COMPILER_LAUNCHER=ccache \
           -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+          -DSERVERS=ON \
+          -DUSE_COREPCH=ON \
+          -DUSE_SCRIPTPCH=ON \
+          -DSKYFIRE_BUILD_TESTS=ON \
           -DTOOLS=OFF \
           -DPACKET_LOG_SERVER=ON \
           -DBOOST_ROOT="$BOOST_ROOT" \
@@ -160,6 +165,23 @@ jobs:
       run: |
         set -euo pipefail
         cmake --build "$BUILD_DIR" --target packetlogserver --parallel "$(nproc)"
+
+    - name: Build clustering daemons and focused tests
+      shell: bash
+      run: |
+        set -euo pipefail
+        cmake --build "$BUILD_DIR" --parallel "$(nproc)" --target \
+          hubserver chatserver battlegroundserver \
+          cluster_foundation_tests hub_control_protocol_tests hub_standby_control_tests \
+          hub_certificate_tests chat_protocol_tests chat_service_tests \
+          battleground_protocol_tests battleground_matcher_tests
+
+    - name: Run clustering tests
+      shell: bash
+      run: |
+        set -euo pipefail
+        ctest --test-dir "$BUILD_DIR" --output-on-failure --no-tests=error \
+          -R '^(cluster_foundation_tests|hub_control_protocol_tests|hub_standby_control_tests|hub_certificate_tests|chat_protocol_tests|chat_service_tests|battleground_protocol_tests|battleground_matcher_tests)$'
 
     - name: ccache stats
       if: always()
