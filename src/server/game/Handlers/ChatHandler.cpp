@@ -50,10 +50,11 @@ void WorldSession::HandlePlayerWhisper(std::string to, std::string const& msg, L
     { SendPlayerNotFoundNotice(to); return; }
     bool const senderBypassesWhisperFilter = sWorld->GetBoolConfig(WorldBoolConfigs::CONFIG_CHAT_GM_WHISPER_FILTER_BYPASS) &&
         GetSecurity() > AccountTypes::SEC_PLAYER;
-    bool const receiverFiltersWhispers = receiver && !receiver->isAcceptWhispers() &&
+    bool const receiverFiltersWhispers = receiver && receiver->GetSession() && !receiver->isAcceptWhispers() &&
         !senderBypassesWhisperFilter &&
+        receiver->GetSession()->HasPermission(rbac::RBAC_PERM_CAN_FILTER_WHISPERS) &&
         !receiver->IsInWhisperWhiteList(sender->GetGUID());
-    if (!receiver || !receiver->GetSession() || receiverFiltersWhispers)
+    if (!receiver || !receiver->GetSession() || (receiverFiltersWhispers && !sender->IsInRaidWith(receiver)))
     {
         SendPlayerNotFoundNotice(to);
         return;
@@ -603,12 +604,16 @@ void WorldSession::HandleAddonMessagechatOpcode(WorldPacket& recvData)
     {
         case ChatMsg::CHAT_MSG_WHISPER:
         {
-            uint32 msgLen = recvData.ReadBits(9);
+            // The lengths and the strings are in different orders here:
+            //
+            //     lengths : target(9), message(8), prefix(5)   -- 22 bits, padded to a byte
+            //     strings : target,    prefix,     message
+            uint32 targetLen = recvData.ReadBits(9);
+            uint32 msgLen = recvData.ReadBits(8);
             uint32 prefixLen = recvData.ReadBits(5);
-            uint32 targetLen = recvData.ReadBits(10);
-            message = recvData.ReadString(msgLen);
-            prefix = recvData.ReadString(prefixLen);
             targetName = recvData.ReadString(targetLen);
+            prefix = recvData.ReadString(prefixLen);
+            message = recvData.ReadString(msgLen);
             break;
         }
         case ChatMsg::CHAT_MSG_PARTY:

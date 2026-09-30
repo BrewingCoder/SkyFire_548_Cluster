@@ -138,7 +138,7 @@ namespace lfg
             }
 
             Group* group = player->GetGroup();
-            if (group && group->isLFGGroup())
+            if (group && group->isLFGGroup() && !group->IsDisbanding())
             {
                 uint64 const groupGuid = group->GetGUID();
                 uint64 const playerGuid = player->GetGUID();
@@ -150,9 +150,27 @@ namespace lfg
                     return;
                 }
 
+                // Socketless sessions leave while another member's exit already
+                // owns Disband. Never nest another Disband from here.
+                if (player->GetSession() && player->GetSession()->IsBot())
+                {
+                    player->RemoveAurasDueToSpell(LFG_SPELL_LUCK_OF_THE_DRAW);
+                    return;
+                }
+
+                // Only the last member out may tear the group down. Anyone else stepping off the
+                // dungeon map - hearthstone, summon, the dungeon finder's own teleport out, or
+                // simply logging in elsewhere - is free to come back, and disbanding here would
+                // evict the members still inside.
+                if (group->GetMembersCount() > 1)
+                {
+                    player->RemoveAurasDueToSpell(LFG_SPELL_LUCK_OF_THE_DRAW);
+                    return;
+                }
+
                 group->Disband();
 
-                SF_LOG_DEBUG("lfg", "LFGPlayerScript::OnMapChanged, Player %s(%u) left LFG dungeon flow; disbanded LFG group %u with state %u.",
+                SF_LOG_DEBUG("lfg", "LFGPlayerScript::OnMapChanged, Player %s(%u) was the only member left; disbanded LFG group %u with state %u.",
                     player->GetName().c_str(), GUID_LOPART(playerGuid), GUID_LOPART(groupGuid), uint32(groupState));
             }
             player->RemoveAurasDueToSpell(LFG_SPELL_LUCK_OF_THE_DRAW);

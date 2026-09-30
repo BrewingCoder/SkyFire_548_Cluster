@@ -17,6 +17,7 @@
 #include "LFGQueue.h"
 #include "LFGScripts.h"
 #include "MapManager.h"
+#include "ObjectAccessor.h"
 #include "ObjectMgr.h"
 #include "Player.h"
 #include "RBAC.h"
@@ -1155,11 +1156,31 @@ namespace lfg
         LfgGuidList playersToTeleport;
         LfgGuidSet expectedPlayers;
 
+        // Prefer a real client as group leader so socketless sessions follow them
+        // after teleport. proposal.leader is usually already chosen that way.
+        uint64 preferredLeader = proposal.leader;
+        uint64 firstRealPlayer = 0;
+        for (LfgProposalPlayerContainer::const_iterator it = proposal.players.begin(); it != proposal.players.end(); ++it)
+        {
+            uint64 guid = it->first;
+            Player* player = ObjectAccessor::FindPlayer(guid);
+            bool const isBot = player && player->GetSession() && player->GetSession()->IsBot();
+            if (player && player->GetSession() && !isBot && !firstRealPlayer)
+                firstRealPlayer = guid;
+        }
+        if (firstRealPlayer)
+        {
+            Player* leaderPlayer = ObjectAccessor::FindPlayer(proposal.leader);
+            bool const leaderIsBot = leaderPlayer && leaderPlayer->GetSession() && leaderPlayer->GetSession()->IsBot();
+            if (leaderIsBot)
+                preferredLeader = firstRealPlayer;
+        }
+
         for (LfgProposalPlayerContainer::const_iterator it = proposal.players.begin(); it != proposal.players.end(); ++it)
         {
             uint64 guid = it->first;
             expectedPlayers.insert(guid);
-            if (guid == proposal.leader)
+            if (guid == preferredLeader)
                 players.push_front(guid);
             else
                 players.push_back(guid);
@@ -1306,6 +1327,33 @@ namespace lfg
         proposal.id = ++m_lfgProposalId;
         ProposalsStore[m_lfgProposalId] = proposal;
         return m_lfgProposalId;
+    }
+
+    uint32 LFGMgr::GetActiveProposalIdForPlayer(uint64 guid) const
+    {
+        for (LfgProposalContainer::const_iterator it = ProposalsStore.begin(); it != ProposalsStore.end(); ++it)
+        {
+            if (it->second.state != LFG_PROPOSAL_INITIATING)
+                continue;
+
+            LfgProposalPlayerContainer::const_iterator itPlayer = it->second.players.find(guid);
+            if (itPlayer != it->second.players.end() && itPlayer->second.accept == LFG_ANSWER_PENDING)
+                return it->first;
+        }
+        return 0;
+    }
+
+    uint8 LFGMgr::GetRoleCheckRoles(uint64 gguid, uint64 playerGuid) const
+    {
+        LfgRoleCheckContainer::const_iterator it = RoleChecksStore.find(gguid);
+        if (it == RoleChecksStore.end())
+            return PLAYER_ROLE_NONE;
+
+        LfgRolesMap::const_iterator itRoles = it->second.roles.find(playerGuid);
+        if (itRoles == it->second.roles.end())
+            return PLAYER_ROLE_NONE;
+
+        return itRoles->second;
     }
 
     /**
@@ -1781,6 +1829,9 @@ namespace lfg
                 {
                     if (player->TeleportTo(returnLocation.MapId, returnLocation.X, returnLocation.Y, returnLocation.Z, returnLocation.O))
                     {
+                        if (WorldSession* session = player->GetSession())
+                            if (session->IsBot() && player->IsBeingTeleported())
+                                session->FinalizeBotTeleport();
                         playerData.ClearReturnLocation();
                         return;
                     }
@@ -1791,6 +1842,9 @@ namespace lfg
 
                 playerData.ClearReturnLocation();
                 player->TeleportToBGEntryPoint();
+                if (WorldSession* session = player->GetSession())
+                    if (session->IsBot() && player->IsBeingTeleported())
+                        session->FinalizeBotTeleport();
             }
 
             return;
@@ -1866,6 +1920,12 @@ namespace lfg
                     if (forceChangeInstance)
                         player->SetSemaphoreTeleportForcedFar(false);
                 }
+                else if (WorldSession* session = player->GetSession())
+                {
+                    // Socketless sessions have no client to ack the worldport.
+                    if (session->IsBot() && player->IsBeingTeleported())
+                        session->FinalizeBotTeleport();
+                }
                 player->SetForcedTeleportFar(false);
             }
         }
@@ -1894,12 +1954,22 @@ namespace lfg
         if (!dungeon)
             return;
 
+        // Snapshot first: TeleportPlayer can finalize a socketless teleport, which
+        // may disband or remove members and invalidate GroupReference iteration.
+        std::vector<uint64> toTeleport;
         for (GroupReference* itr = group->GetFirstMember(); itr != NULL; itr = itr->next())
         {
             Player* member = itr->GetSource();
             if (!member || member->GetMapId() != uint32(dungeon->map))
                 continue;
+            toTeleport.push_back(member->GetGUID());
+        }
 
+        for (uint64 guid : toTeleport)
+        {
+            Player* member = ObjectAccessor::FindPlayerInOrOutOfWorld(guid);
+            if (!member || member->GetMapId() != uint32(dungeon->map))
+                continue;
             TeleportPlayer(member, true);
         }
     }
@@ -1915,8 +1985,19 @@ namespace lfg
         uint32 gDungeonId = GetDungeon(gguid);
         if (gDungeonId != dungeonId)
         {
-            SF_LOG_DEBUG("lfg.dungeon.finish", "Group %u finished dungeon %u but queued for %u", GUID_LOPART(gguid), dungeonId, gDungeonId);
-            return;
+            // From Cataclysm on, a dungeon has one difficulty-0 DungeonEncounter list shared by
+            // its normal and heroic versions, which are separate LFG dungeon ids, and an
+            // `instance_encounters` row can name only one of them. Accept the group's own dungeon
+            // when it is the same instance at another difficulty. Same map alone would be too
+            // loose: Blackrock Depths is two same-difficulty LFG entries that must not credit
+            // each other.
+            LFGDungeonData const* credited = GetLFGDungeon(dungeonId);
+            LFGDungeonData const* queued = GetLFGDungeon(gDungeonId);
+            if (!credited || !queued || credited->map != queued->map || credited->difficulty == queued->difficulty)
+            {
+                SF_LOG_DEBUG("lfg.dungeon.finish", "Group %u finished dungeon %u but queued for %u", GUID_LOPART(gguid), dungeonId, gDungeonId);
+                return;
+            }
         }
 
         if (GetState(gguid) == LFG_STATE_FINISHED_DUNGEON) // Shouldn't happen. Do not reward multiple times
@@ -2553,45 +2634,47 @@ namespace lfg
         return plr1 && plr2 && (plr1->GetSocial()->HasIgnore(low2) || plr2->GetSocial()->HasIgnore(low1));
     }
 
+    // These use FindPlayerInOrOutOfWorld: a far teleport takes the player out of world for its
+    // duration, and sending a packet needs a session, not a player standing on a map.
     void LFGMgr::SendLfgRoleChosen(uint64 guid, uint64 pguid, uint8 roles)
     {
-        if (Player* player = ObjectAccessor::FindPlayer(guid))
+        if (Player const* player = ObjectAccessor::FindPlayerInOrOutOfWorld(guid))
             player->GetSession()->SendLfgRoleChosen(pguid, roles);
     }
 
     void LFGMgr::SendLfgRoleCheckUpdate(uint64 guid, LfgRoleCheck const& roleCheck)
     {
-        if (Player* player = ObjectAccessor::FindPlayer(guid))
+        if (Player const* player = ObjectAccessor::FindPlayerInOrOutOfWorld(guid))
             player->GetSession()->SendLfgRoleCheckUpdate(roleCheck);
     }
 
     void LFGMgr::SendLfgUpdateStatus(uint64 guid, LfgUpdateData const& data, bool party)
     {
-        if (Player* player = ObjectAccessor::FindPlayer(guid))
+        if (Player const* player = ObjectAccessor::FindPlayerInOrOutOfWorld(guid))
             player->GetSession()->SendLfgUpdateStatus(data, party);
     }
 
     void LFGMgr::SendLfgJoinResult(uint64 guid, LfgJoinResultData const& data)
     {
-        if (Player* player = ObjectAccessor::FindPlayer(guid))
+        if (Player const* player = ObjectAccessor::FindPlayerInOrOutOfWorld(guid))
             player->GetSession()->SendLfgJoinResult(data);
     }
 
     void LFGMgr::SendLfgBootProposalUpdate(uint64 guid, LfgPlayerBoot const& boot)
     {
-        if (Player* player = ObjectAccessor::FindPlayer(guid))
+        if (Player const* player = ObjectAccessor::FindPlayerInOrOutOfWorld(guid))
             player->GetSession()->SendLfgBootProposalUpdate(boot);
     }
 
     void LFGMgr::SendLfgUpdateProposal(uint64 guid, LfgProposal const& proposal)
     {
-        if (Player* player = ObjectAccessor::FindPlayer(guid))
+        if (Player const* player = ObjectAccessor::FindPlayerInOrOutOfWorld(guid))
             player->GetSession()->SendLfgUpdateProposal(proposal);
     }
 
     void LFGMgr::SendLfgQueueStatus(uint64 guid, LfgQueueStatusData const& data)
     {
-        if (Player* player = ObjectAccessor::FindPlayer(guid))
+        if (Player const* player = ObjectAccessor::FindPlayerInOrOutOfWorld(guid))
             player->GetSession()->SendLfgQueueStatus(data);
     }
 
@@ -2970,8 +3053,22 @@ namespace lfg
 
     void LFGMgr::SetupGroupMember(uint64 guid, uint64 gguid)
     {
-        LfgDungeonSet dungeons;
-        dungeons.insert(GetDungeon(gguid));
+        // Keep a random or seasonal selection: it is the only record that the player queued
+        // randomly at all, and FinishDungeon() reads it back to decide whether a reward is owed.
+        // Anything else still collapses to the dungeon the group is in.
+        LfgDungeonSet dungeons = GetSelectedDungeons(guid);
+
+        bool queuedRandom = false;
+        if (!dungeons.empty())
+            if (LFGDungeonData const* selected = GetLFGDungeon(*dungeons.begin()))
+                queuedRandom = selected->type == LFG_TYPE_RANDOM || selected->seasonal;
+
+        if (!queuedRandom)
+        {
+            dungeons.clear();
+            dungeons.insert(GetDungeon(gguid));
+        }
+
         SetActiveQueueId(guid, GetActiveQueueId(gguid));
         SetSelectedDungeons(guid, dungeons);
         SetState(guid, GetState(gguid));

@@ -53,6 +53,7 @@
 #include "WorldPacket.h"
 #include "WorldSession.h"
 
+#include <array>
 #include <math.h>
 
 float baseMoveSpeed[MAX_MOVE_TYPE] =
@@ -1342,6 +1343,18 @@ void Unit::_UpdateSpells(uint32 time)
 
 void Unit::_UpdateAutoRepeatSpell()
 {
+    // Pause Auto Shot / wand while a real cast bar is up. SPELL_ATTR2_NOT_RESET_AUTO_ACTIONS
+    // only means "do not reset the ranged swing timer" — IsNonMeleeSpellCasted(isAutoshoot=true)
+    // ignores those spells, which lets Auto Shot keep firing and clip the cast bar.
+    if (Spell* generic = m_currentSpells[CURRENT_GENERIC_SPELL])
+    {
+        if (generic->getState() == SPELL_STATE_PREPARING && generic->GetCastTime() > 0)
+        {
+            m_AutoRepeatFirstCast = true;
+            return;
+        }
+    }
+
     // check "realtime" interrupts
     // don't cancel spells which are affected by a SPELL_AURA_CAST_WHILE_WALKING effect
     if (((GetTypeId() == TypeID::TYPEID_PLAYER && ToPlayer()->isMoving()) || IsNonMeleeSpellCasted(false, false, true, m_currentSpells[CURRENT_AUTOREPEAT_SPELL]->m_spellInfo->Id == 75)) &&
@@ -1362,15 +1375,32 @@ void Unit::_UpdateAutoRepeatSpell()
     // castroutine
     if (isAttackReady(WeaponAttackType::RANGED_ATTACK))
     {
-        // Check if able to cast
-        if (m_currentSpells[CURRENT_AUTOREPEAT_SPELL]->CheckCast(true) != SpellCastResult::SPELL_CAST_OK)
+        SpellCastResult const autoResult = m_currentSpells[CURRENT_AUTOREPEAT_SPELL]->CheckCast(true);
+        if (autoResult != SpellCastResult::SPELL_CAST_OK)
         {
+            // Auto Shot: keep the channel on temporary fails (moving / LoS / range).
+            // Cancel only when the target is gone, otherwise it sticks and blocks retargeting.
+            if (m_currentSpells[CURRENT_AUTOREPEAT_SPELL]->m_spellInfo->Id == 75)
+            {
+                if (autoResult == SpellCastResult::SPELL_FAILED_TARGETS_DEAD
+                    || autoResult == SpellCastResult::SPELL_FAILED_BAD_TARGETS
+                    || autoResult == SpellCastResult::SPELL_FAILED_BAD_IMPLICIT_TARGETS)
+                {
+                    InterruptSpell(CURRENT_AUTOREPEAT_SPELL);
+                    return;
+                }
+                m_AutoRepeatFirstCast = true;
+                return;
+            }
             InterruptSpell(CURRENT_AUTOREPEAT_SPELL);
             return;
         }
 
-        // we want to shoot
+        // The swing must not be auto-repeat: otherwise GetCurrentContainer() is
+        // AUTOREPEAT and SetCurrentCastedSpell replaces the channel. Clients
+        // re-press Auto Shot; a socketless session arms it once.
         Spell* spell = new Spell(this, m_currentSpells[CURRENT_AUTOREPEAT_SPELL]->m_spellInfo, TRIGGERED_FULL_MASK);
+        spell->SetAutoRepeat(false);
         spell->prepare(&(m_currentSpells[CURRENT_AUTOREPEAT_SPELL]->m_targets));
 
         // all went good, reset attack
@@ -5682,13 +5712,14 @@ void CharmInfo::InitPetActionBar()
         SetActionBar(ACTION_BAR_INDEX_PET_SPELL_START + i, 0, ACT_PASSIVE);
 
     // last 3 SpellOrActions are reactions
+    //
+    // Mists has three pet stances - Assist, Defensive, Passive - Aggressive having been removed in
+    // 5.0.4. These slots were filled with COMMAND_ATTACK - i, arithmetic on the command enum
+    // rather than the reaction one, which yields Aggressive, Assist, Passive: a stance the client
+    // no longer has, and no Defensive button at all.
+    static std::array<ReactStates, 3> const petStances = { REACT_ASSIST, REACT_DEFENSIVE, REACT_PASSIVE };
     for (uint32 i = 0; i < ACTION_BAR_INDEX_END - ACTION_BAR_INDEX_PET_SPELL_END; ++i)
-    {
-        if (i != 1)
-            SetActionBar(ACTION_BAR_INDEX_PET_SPELL_END + i, COMMAND_ATTACK - i, ACT_REACTION);
-        else
-            SetActionBar(ACTION_BAR_INDEX_PET_SPELL_END + i, REACT_ASSIST, ACT_REACTION);
-    }
+        SetActionBar(ACTION_BAR_INDEX_PET_SPELL_END + i, petStances[i], ACT_REACTION);
 }
 
 void CharmInfo::InitEmptyActionBar(bool withAttack)
@@ -5878,6 +5909,13 @@ void CharmInfo::LoadPetActionBar(const std::string& data)
         ActiveStates type = ActiveStates(atol(*iter));
         ++iter;
         uint32 action = uint32(atol(*iter));
+
+        // The stance slots are fixed by the client build rather than arranged by the player, so
+        // the ones InitPetActionBar just wrote stand. Restoring them would let a bar saved before
+        // Aggressive was removed in 5.0.4 outlive the fix for good; dropping them heals such a row
+        // on the next summon, and the next save writes the corrected bar back out.
+        if (index >= ACTION_BAR_INDEX_PET_SPELL_END)
+            continue;
 
         PetActionBar[index].SetActionAndType(action, type);
 

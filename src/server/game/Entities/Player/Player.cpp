@@ -1246,7 +1246,9 @@ void Player::HandleDrowning(uint32 time_diff)
                 m_MirrorTimer[BREATH_TIMER] += 1 * IN_MILLISECONDS;
                 // Calculate and deal damage
                 /// @todo Check this formula
-                uint32 damage = GetMaxHealth() / 5 + std::rand() % (getLevel() - 1);
+                // getLevel()-1 is 0 at level 1, which is a modulo-by-zero crash.
+                uint32 const levelSpread = getLevel() > 1 ? (getLevel() - 1) : 1;
+                uint32 damage = GetMaxHealth() / 5 + uint32(std::rand() % levelSpread);
                 EnvironmentalDamage(DAMAGE_DROWNING, damage);
             }
             else if (!(m_MirrorTimerFlagsLast & UNDERWATER_INWATER))      // Update time in client if need
@@ -1282,7 +1284,8 @@ void Player::HandleDrowning(uint32 time_diff)
                 m_MirrorTimer[FATIGUE_TIMER] += 1 * IN_MILLISECONDS;
                 if (IsAlive())                                            // Calculate and deal damage
                 {
-                    uint32 damage = GetMaxHealth() / 5 + std::rand() % (getLevel() - 1);
+                    uint32 const levelSpread = getLevel() > 1 ? (getLevel() - 1) : 1;
+                    uint32 damage = GetMaxHealth() / 5 + uint32(std::rand() % levelSpread);
                     EnvironmentalDamage(DAMAGE_EXHAUSTED, damage);
                 }
                 else if (HasFlag(PLAYER_FIELD_PLAYER_FLAGS, PLAYER_FLAGS_GHOST))       // Teleport ghost to graveyard
@@ -1750,6 +1753,9 @@ void Player::Update(uint32 p_time)
     //because we don't want player's ghost teleported from graveyard
     if (IsHasDelayedTeleport() && IsAlive())
         TeleportTo(m_teleport_dest, m_teleport_options);
+
+    // Per-tick script hook so modules can drive extra per-player work.
+    sScriptMgr->OnPlayerUpdate(this, p_time);
 }
 
 void Player::setDeathState(DeathState s)
@@ -2893,16 +2899,10 @@ Creature* Player::GetNPCIfCanInteractWith(uint64 guid, uint32 npcflagmask)
     if (creature->GetCharmerGUID())
         return NULL;
 
-    // not enemy
-    if (creature->IsHostileTo(this))
+    // not enemy and not unfriendly - GetReactionTo() honours SPELL_AURA_FORCE_REACTION,
+    // so a disguise makes the faction's NPCs talk to the player as well as ignore him
+    if (creature->GetReactionTo(this) <= REP_UNFRIENDLY)
         return NULL;
-
-    // not unfriendly
-    if (FactionTemplateEntry const* factionTemplate = sFactionTemplateStore.LookupEntry(creature->getFaction()))
-        if (factionTemplate->faction)
-            if (FactionEntry const* faction = sFactionStore.LookupEntry(factionTemplate->faction))
-                if (faction->reputationListID >= 0 && GetReputationMgr().GetRank(faction) <= REP_UNFRIENDLY)
-                    return NULL;
 
     // not too far
     if (!creature->IsWithinDistInMap(this, INTERACTION_DISTANCE))
@@ -3306,6 +3306,24 @@ void Player::GiveLevel(uint8 level)
             learnSpell(750, true); // Plate Armor
 
     sScriptMgr->OnPlayerLevelChanged(this, oldLevel);
+}
+
+void Player::LearnSpecialization(uint32 specializationId)
+{
+    if (!specializationId)
+        return;
+
+    SetTalentSpecialization(GetActiveSpec(), specializationId);
+    SetUInt32Value(PLAYER_FIELD_CURRENT_SPEC_ID, specializationId);
+    UpdateTalentSpecializationManaBonus();
+
+    // Learn every spell this spec grants up to the current level.
+    std::list<uint32> learnList = GetSpellsForLevels(0, getRaceMask(), specializationId, 0, getLevel());
+    for (std::list<uint32>::const_iterator iter = learnList.begin(); iter != learnList.end(); ++iter)
+        if (!HasSpell(*iter))
+            learnSpell(*iter, true);
+
+    SendTalentsInfoData();
 }
 
 void Player::InitTalentForLevel()
@@ -13998,6 +14016,20 @@ void Player::_LoadGroup(PreparedQueryResult result)
     {
         if (Group* group = sGroupMgr->GetGroupByDbStoreId((*result)[0].GetUInt32()))
         {
+            // A leftover party_member row can point at a storage id a completely different group
+            // has since been handed. Joining it would put this character in a group that never
+            // invited them.
+            if (!group->IsMember(GetGUID()))
+            {
+                SF_LOG_ERROR("entities.player", "Player::_LoadGroup: %s (GUID: %u) has a party_member row for group storage id %u, which does not list them as a member. Dropping the row.",
+                    GetName().c_str(), GetGUIDLow(), (*result)[0].GetUInt32());
+
+                PreparedStatement* stmt = CharacterDatabase.GetPreparedStatement(CHAR_DEL_GROUP_MEMBER);
+                stmt->setUInt32(0, GetGUIDLow());
+                CharacterDatabase.Execute(stmt);
+                return;
+            }
+
             uint8 subgroup = group->GetMemberGroup(GetGUID());
             SetGroup(group, subgroup);
             if (getLevel() >= LEVELREQUIREMENT_HEROIC)
@@ -18476,8 +18508,16 @@ bool Player::IsAlwaysDetectableFor(WorldObject const* seer) const
         return true;
 
     if (const Player* seerPlayer = seer->ToPlayer())
+    {
+        // Socketless sessions do not share quest/aura visibility with real clients.
+        // Treat them as detectable so they stay visible in the open world.
+        if (GetSession() && GetSession()->IsBot()
+            && seerPlayer->GetSession() && !seerPlayer->GetSession()->IsBot())
+            return true;
+
         if (IsGroupVisibleFor(seerPlayer))
             return !(seerPlayer->duel && seerPlayer->duel->startTime != 0 && seerPlayer->duel->opponent == this);
+    }
 
     return false;
 }
@@ -21445,15 +21485,18 @@ bool Player::LearnTalent(uint16 talentId)
     if (talentInfo->playerClass != getClass())
         return false;
 
-    // check if we have enough talent points
-    if (talentInfo->Row > maxTalentRow)
+    // CalculateTalentsPoints() is floor(level/15): the count of unlocked tiers
+    // (rows 0..N-1). MoP rows unlock at 15/30/45/60/75/90.
+    if (talentInfo->Row >= maxTalentRow)
         return false;
 
-    // Check if player doesnt have any spell in selected collumn
+    // Check if the player already has a talent in this tier.
     for (uint32 i = 0; i < sTalentStore.GetNumRows(); i++)
     {
         if (TalentEntry const* talent = sTalentStore.LookupEntry(i))
         {
+            if (talent->playerClass != getClass())
+                continue;
             if (talentInfo->Row == talent->Row && HasSpell(talent->SpellId))
                 return false;
         }
@@ -22319,6 +22362,10 @@ void Player::ResetTimeSync()
 
 void Player::SendTimeSync()
 {
+    // Socketless sessions have no client to answer time-sync requests.
+    if (GetSession() && GetSession()->IsBot())
+        return;
+
     m_timeSyncQueue.push(m_movementCounter++);
 
     WorldPacket data(SMSG_TIME_SYNC_REQUEST, 4);
@@ -22960,18 +23007,15 @@ void Player::SendMovementSetCanTurnWhileFalling(bool apply)
 
 void Player::SendMovementSetCollisionHeight(float height)
 {
-    // SET and UPDATE layouts place Height/Scale in opposite MSEExtraElement order.
     static MovementStatusElements const extraElements[] = { MSEExtraFloat, MSEExtraFloat2 };
 
-    Movement::ExtraMovementStatusElement setExtra(extraElements);
-    setExtra.Data.floatData = height; // Height
-    setExtra.Data.floatData2 = 1.0f;   // Scale
-    Movement::PacketSender(this, NULL_OPCODE, SMSG_MOVE_SET_COLLISION_HEIGHT, NULL_OPCODE, &setExtra).Send();
-
-    Movement::ExtraMovementStatusElement updateExtra(extraElements);
-    updateExtra.Data.floatData = 1.0f;   // Scale
-    updateExtra.Data.floatData2 = height; // Height
-    Movement::PacketSender(this, NULL_OPCODE, NULL_OPCODE, SMSG_MOVE_UPDATE_COLLISION_HEIGHT, &updateExtra).Send();
+    Movement::ExtraMovementStatusElement extra(extraElements);
+    extra.Data.floatData = height;
+    extra.Data.floatData2 = 1;
+    // Do not broadcast SMSG_MOVE_UPDATE_COLLISION_HEIGHT — its MoP structure is
+    // unreliable here and nearby clients misread it as object scale changes.
+    // Self gets SET_COLLISION_HEIGHT; others see the mount via UNIT_FIELD_MOUNT_DISPLAY_ID.
+    Movement::PacketSender(this, NULL_OPCODE, SMSG_MOVE_SET_COLLISION_HEIGHT, NULL_OPCODE, &extra).Send();
 }
 
 void Player::SendApplyMovementForce(bool apply, Position const& source, float force /*= 0.0f*/)
