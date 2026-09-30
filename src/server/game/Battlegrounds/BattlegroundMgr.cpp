@@ -103,7 +103,7 @@ void BattlegroundMgr::Update(uint32 diff)
 
     for (auto const& result : Skyfire::BattlegroundService::TakeResults())
     {
-        auto queue = BGQueueTypeId(BattlegroundTypeId(result.Request.Type),0);
+        auto queue = BGQueueTypeId(BattlegroundTypeId(result.Request.Type),result.Request.ArenaType);
         if (queue > BATTLEGROUND_QUEUE_NONE && queue < MAX_BATTLEGROUND_QUEUE_TYPES)
             m_BattlegroundQueues[queue].HandleRemoteResult(result);
     }

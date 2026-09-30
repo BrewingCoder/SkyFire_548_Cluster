@@ -78,6 +78,12 @@ target_include_directories(database_setup_tests PRIVATE
 
 add_test(NAME database_setup_tests COMMAND database_setup_tests)
 
+add_executable(battleground_message_tests BattlegroundMessageTests.cpp)
+target_include_directories(battleground_message_tests PRIVATE
+  ${CMAKE_SOURCE_DIR}/src/server/game/Battlegrounds
+)
+add_test(NAME battleground_message_tests COMMAND battleground_message_tests)
+
 add_executable(realm_socket_tests
   ${CMAKE_SOURCE_DIR}/src/server/authserver/Server/RealmSocket.cpp
   ${CMAKE_SOURCE_DIR}/src/server/shared/Packets/PacketLogServer.cpp

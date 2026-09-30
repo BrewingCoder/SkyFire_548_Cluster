@@ -174,14 +174,14 @@ jobs:
           hubserver chatserver battlegroundserver \
           cluster_foundation_tests hub_control_protocol_tests hub_standby_control_tests \
           hub_certificate_tests chat_protocol_tests chat_service_tests \
-          battleground_protocol_tests battleground_matcher_tests database_setup_tests
+          battleground_protocol_tests battleground_matcher_tests battleground_message_tests database_setup_tests
 
     - name: Run clustering tests
       shell: bash
       run: |
         set -euo pipefail
         ctest --test-dir "$BUILD_DIR" --output-on-failure --no-tests=error \
-          -R '^(cluster_foundation_tests|hub_control_protocol_tests|hub_standby_control_tests|hub_certificate_tests|chat_protocol_tests|chat_service_tests|battleground_protocol_tests|battleground_matcher_tests|database_setup_tests)$'
+          -R '^(cluster_foundation_tests|hub_control_protocol_tests|hub_standby_control_tests|hub_certificate_tests|chat_protocol_tests|chat_service_tests|battleground_protocol_tests|battleground_matcher_tests|battleground_message_tests|database_setup_tests)$'
 
     - name: ccache stats
       if: always()

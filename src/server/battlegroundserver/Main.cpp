@@ -41,7 +41,7 @@ int main(int argc, char** argv)
     {
         std::string argument = argv[i];
         if (argument == "--help")
-        { std::puts("battlegroundserver -c battlegroundserver.conf\nNative realm-scoped unrated battleground matchmaking service."); return 0; }
+        { std::puts("battlegroundserver -c battlegroundserver.conf\nNative realm-scoped battleground and arena matchmaking service."); return 0; }
         if (argument == "-c" && i + 1 < argc) config = argv[++i];
         else if (argument == "--hub-node-key" && i + 1 < argc) expectedKey = argv[++i];
         else if (argument == "--hub-control-read" && i + 1 < argc && Handle(argv[++i], control)) { }

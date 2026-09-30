@@ -31,7 +31,7 @@ static void Invariants(Snapshot const& s, Response const& response)
             for(auto id:plan.Teams[team])
             {
                 auto group=std::find_if(s.Groups.begin(),s.Groups.end(),[&](auto const& g){return g.Id==id;});
-                Check(group!=s.Groups.end() && group->Team==team && used.insert(id).second,"Group split, invented or reused");
+                Check(group!=s.Groups.end() && (s.ArenaType || group->Team==team) && used.insert(id).second,"Group split, invented or reused");
                 counts[team]+=unsigned(group->Members.size());
             }
         Check(counts[0]||counts[1],"Empty plan");
@@ -98,6 +98,34 @@ int main()
         successor.Sequence=3;Check(!book.Accept("world-c",successor,60000,result),"Generation bound to node");
         successor.Realm=2;Check(book.Accept("world-c",successor,60000,result),"Realm isolation");
 
+        s=Base();s.ArenaType=2;s.Min=s.Max=2;s.Groups={Make(1,0,1),Make(2,0,1),Make(3,0,2)};
+        Check(PlanMatches(s,result) && result.Plans.size()==1,"Same-faction skirmish must keep groups whole");Invariants(s,result);
+        s.Groups={Make(1,0,2)};Check(PlanMatches(s,result) && result.Plans.empty(),"Arena needs two teams");
+        s.Groups={Make(1,0,2),Make(2,1,2)};
+        Check(PlanMatches(s,result) && result.Plans.size()==1,"Opposite-faction skirmish");Invariants(s,result);
+        s.Rated=true;s.MaxRatingDifference=150;s.RatingDiscardMs=30000;
+        s.Groups[0].ArenaTeam=10;s.Groups[1].ArenaTeam=20;
+        s.Groups[0].MatchmakerRating=1500;s.Groups[1].MatchmakerRating=1650;
+        Check(PlanMatches(s,result) && result.Plans.size()==1,"Rated boundary match");
+        s.Groups[1].MatchmakerRating=1651;
+        Check(PlanMatches(s,result) && result.Plans.empty(),"Rating window enforced");
+        s.Groups[0].WaitMs=30000;
+        Check(PlanMatches(s,result) && result.Plans.size()==1,"Rating wait expires");
+        s.Groups[1].ArenaTeam=10;
+        Check(PlanMatches(s,result) && result.Plans.empty(),"A rated group cannot fight itself");
+        s.Groups[1].ArenaTeam=20;s.Groups[1].Team=0;
+        Check(PlanMatches(s,result) && result.Plans.size()==1,"Same-faction rated match");Invariants(s,result);
+        s.Groups[1].Members.pop_back();Check(!PlanMatches(s,result),"Incomplete rated team rejected");
+        s.Testing=true;s.Min=1;Check(PlanMatches(s,result) && result.Plans.size()==1,"Arena testing admits smaller teams");
+        QueueBook arenaBook;s.Sequence=1;
+        Check(arenaBook.Accept("world-a",s,100,result),"Rated arena queue accepted");
+        auto separate=s;separate.Rated=false;separate.MaxRatingDifference=separate.RatingDiscardMs=0;
+        for(auto& group:separate.Groups){group.ArenaTeam=0;group.Rating=group.MatchmakerRating=0;}
+        Check(arenaBook.Accept("world-a",separate,101,result),"Unrated queue has independent sequence watermark");
+        separate.ArenaType=3;separate.Max=3;
+        Check(arenaBook.Accept("world-a",separate,102,result),"Arena sizes have independent sequence watermarks");
+        Check(!arenaBook.Accept("world-a",s,103,result),"Rated replay remains fenced");
+
         std::mt19937 random(548);
         for(unsigned iteration=0;iteration<500;++iteration)
         {
@@ -107,6 +135,15 @@ int main()
             Check(PlanMatches(s,result),"Random valid snapshot rejected");Invariants(s,result);
             Snapshot decoded;Check(DecodeSnapshot(EncodeSnapshot(s).Bytes,decoded),"Snapshot roundtrip");
             Response decodedResponse;Check(DecodeResponse(EncodeResponse(result).Bytes,decodedResponse),"Response roundtrip");
+        }
+        for(unsigned iteration=0;iteration<200;++iteration)
+        {
+            s=Base();s.ArenaType=iteration%2 ? 3 : 5;s.Min=s.Max=s.ArenaType;
+            for(unsigned i=1;i<=20;++i)s.Groups.push_back(Make(i,random()%2,1+random()%s.Max));
+            Check(PlanMatches(s,result),"Valid skirmish rejected");Invariants(s,result);
+            auto expected=EncodeResponse(result).Bytes;
+            std::reverse(s.Groups.begin(),s.Groups.end());
+            Check(PlanMatches(s,result) && EncodeResponse(result).Bytes==expected,"Arena ordering must be deterministic");
         }
         std::cout<<"Battleground matcher and ownership checks passed\n";return 0;
     }

@@ -3470,10 +3470,10 @@ Chat.GuildAuthority.Enable = 0
 
 ###################################################################################################
 # BATTLEGROUND MATCHMAKING SERVICE
-# Off by default. When enabled, unrated battleground queue selection and backfill use the
+# Off by default. When enabled, unrated battleground queue selection/backfill and arena matchmaking use the
 # realm-scoped battlegroundserver. Worldserver validates proposals and hosts matches.
-# Arenas and rated queues continue using the local matcher. An unavailable service holds
-# unrated queues; it never falls back to a competing local matcher.
+# Rated battlegrounds continue using the local matcher. An unavailable service holds
+# remote queues; it never falls back to a competing local matcher. Install matching world/BG binaries.
 # Requires Cluster.Enable and world TLS credentials authorized by battlegroundserver.
 BattlegroundService.Enable = 0
 BattlegroundService.Host = "127.0.0.1"

@@ -16,10 +16,12 @@ import tempfile
 import unittest
 
 
-def snapshot(sequence=1, realm=1, generation='a'*64):
-    payload = struct.pack('!BIH',1,realm,64)+generation.encode()+struct.pack('!QIBIIBBIH',sequence,2,0,2,4,0,0,60000,2)
-    for group,team,members in [(10,0,[101,102]),(20,1,[201,202])]:
+def snapshot(sequence=1, realm=1, generation='a'*64, arena=0, rated=False, same_faction=False):
+    payload = struct.pack('!BIH',2,realm,64)+generation.encode()+struct.pack('!QIBIIBBI',sequence,2,0,2,arena or 4,0,0,60000)
+    payload += struct.pack('!BBIIH',arena,int(rated),150 if rated else 0,30000 if rated else 0,2)
+    for group,team,members in [(10,0,[101,102]),(20,0 if same_faction else 1,[201,202])]:
         payload += struct.pack('!QBBIH',group,team,0,1000,2)+struct.pack('!QQ',*members)
+        payload += struct.pack('!QII',group if rated else 0,1500 if rated else 0,1500 if rated else 0)
     return payload+struct.pack('!H',0)
 
 
@@ -136,6 +138,9 @@ Logger.root = 3,Console
         await self.exchange('world-b',1,1,accepted=False)
         expected=struct.pack('!BQHIHQHQ',1,1,1,0,1,10,1,20)
         self.assertEqual(await self.exchange('world-a',1,2,snapshot()),expected)
+        self.assertEqual(await self.exchange('world-a',1,2,snapshot(arena=2,rated=True,same_faction=True)),expected)
+        self.assertEqual(await self.exchange('world-a',1,2,snapshot(arena=2)),expected)
+        await self.exchange('world-a',1,2,snapshot(arena=2,rated=True),accepted=False)
         await self.exchange('world-a',1,2,snapshot(),accepted=False)
         await self.exchange('world-a',1,2,snapshot(2,realm=2),accepted=False)
         await self.exchange('world-a',1,2,snapshot(2,generation='c'*64),accepted=False)

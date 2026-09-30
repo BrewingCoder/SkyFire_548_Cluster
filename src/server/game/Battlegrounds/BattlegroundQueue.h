@@ -119,10 +119,10 @@ private:
         uint64 Pending = 0;
         std::chrono::steady_clock::time_point Submitted{}, Next{};
     };
-    std::map<std::pair<uint32,uint8>,RemoteContext> m_RemoteContexts;
+    std::map<Skyfire::BattlegroundService::QueueKey,RemoteContext> m_RemoteContexts;
     uint64 m_NextRemoteId = 0;
-    bool EligibleRemoteGroup(GroupQueueInfo const& group, BattlegroundTypeId type, BattlegroundBracketId bracket) const;
-    void SubmitRemoteQueue(BattlegroundTypeId type, BattlegroundBracketId bracket);
+    bool EligibleRemoteGroup(GroupQueueInfo const& group, BattlegroundTypeId type, BattlegroundBracketId bracket, uint8 arenaType, bool rated) const;
+    void SubmitRemoteQueue(BattlegroundTypeId type, BattlegroundBracketId bracket, uint8 arenaType, bool rated);
     bool InviteGroupToBG(GroupQueueInfo* ginfo, Battleground* bg, uint32 side);
     uint32 m_WaitTimes[BG_TEAMS_COUNT][MAX_BATTLEGROUND_BRACKETS][COUNT_OF_PLAYERS_TO_AVERAGE_WAIT_TIME];
     uint32 m_WaitTimeLastPlayer[BG_TEAMS_COUNT][MAX_BATTLEGROUND_BRACKETS];

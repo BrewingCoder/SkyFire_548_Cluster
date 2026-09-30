@@ -26,7 +26,7 @@ namespace Skyfire::BattlegroundService
             std::uint64_t Sequence = 0;
             std::mutex Lock;
             std::condition_variable Wake;
-            using Key = std::pair<std::uint32_t,std::uint8_t>;
+            using Key = QueueKey;
             struct Queued { Snapshot Request; std::chrono::steady_clock::time_point Deadline; };
             std::map<Key,Queued> Pending;
             std::deque<Result> Results;
@@ -174,7 +174,7 @@ namespace Skyfire::BattlegroundService
         if(Active->Stopping || (snapshot.Realm && snapshot.Realm!=Active->Realm)) return 0;
         snapshot.Realm=Active->Realm; snapshot.Generation=Active->Generation; snapshot.Sequence=++Active->Sequence;
         if(!ValidSnapshot(snapshot)) return 0;
-        Client::Key key{snapshot.Type,snapshot.Bracket};
+        Client::Key key = KeyFor(snapshot);
         if(!Active->Pending.count(key) && Active->Pending.size()>=64) return 0;
         auto sequence=snapshot.Sequence;
         Active->Pending[key]={std::move(snapshot),std::chrono::steady_clock::now()+std::chrono::seconds(10)};

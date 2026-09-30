@@ -7,6 +7,7 @@
 #include "ClusterProtocol.h"
 #include <array>
 #include <set>
+#include <tuple>
 
 namespace Skyfire::BattlegroundService
 {
@@ -20,6 +21,8 @@ namespace Skyfire::BattlegroundService
         bool Premade = false;
         std::uint32_t WaitMs = 0;
         std::vector<std::uint64_t> Members;
+        std::uint64_t ArenaTeam = 0;
+        std::uint32_t Rating = 0, MatchmakerRating = 0;
     };
     struct RunningMatch { std::uint32_t Instance = 0; std::array<std::uint32_t, 2> Free{}; };
     struct Snapshot
@@ -35,7 +38,12 @@ namespace Skyfire::BattlegroundService
         std::uint32_t PremadeWaitMs = 0;
         std::vector<Group> Groups;
         std::vector<RunningMatch> Running;
+        std::uint8_t ArenaType = 0;
+        bool Rated = false;
+        std::uint32_t MaxRatingDifference = 0, RatingDiscardMs = 0;
     };
+    using QueueKey = std::tuple<std::uint32_t, std::uint8_t, std::uint8_t, bool>;
+    inline QueueKey KeyFor(Snapshot const& s) { return {s.Type, s.Bracket, s.ArenaType, s.Rated}; }
     struct Plan { std::uint32_t Instance = 0; std::array<std::vector<std::uint64_t>, 2> Teams; };
     struct Response { std::uint64_t Sequence = 0; std::vector<Plan> Plans; };
     inline void Write64(Cluster::Writer& out, std::uint64_t value)
@@ -46,10 +54,18 @@ namespace Skyfire::BattlegroundService
     {
         if (!s.Realm || !s.Sequence || s.Generation.size()!=64 || s.Generation.find_first_not_of("0123456789abcdef")!=std::string::npos ||
             !s.Type || s.Type>255 || s.Bracket>31 || !s.Min || s.Min>s.Max || s.Max>40 || s.InvitationType>1 || s.Groups.size()>MaxGroups || s.Running.size()>MaxRunning) return false;
+        if (s.ArenaType)
+        {
+            if ((s.ArenaType != 2 && s.ArenaType != 3 && s.ArenaType != 5) || s.Max != s.ArenaType ||
+                s.Min != (s.Testing ? 1u : s.ArenaType) || !s.Running.empty()) return false;
+        }
+        else if (s.Rated || s.MaxRatingDifference || s.RatingDiscardMs) return false;
         std::set<std::uint64_t> groups,players; std::set<std::uint32_t> running;
         for (auto const& group:s.Groups)
         {
             if (!group.Id || group.Team>1 || group.Members.empty() || group.Members.size()>s.Max || !groups.insert(group.Id).second) return false;
+            if (s.Rated && (!group.ArenaTeam || group.Members.size() < s.Min)) return false;
+            if (!s.Rated && (group.ArenaTeam || group.Rating || group.MatchmakerRating)) return false;
             for (auto player:group.Members) if (!player || !players.insert(player).second || players.size()>MaxMembers) return false;
         }
         for (auto const& match:s.Running)
@@ -58,13 +74,15 @@ namespace Skyfire::BattlegroundService
     }
     inline Cluster::Writer EncodeSnapshot(Snapshot const& s)
     {
-        Cluster::Writer out; out.U8(1); out.U32(s.Realm); out.String(s.Generation); Write64(out,s.Sequence);
+        Cluster::Writer out; out.U8(2); out.U32(s.Realm); out.String(s.Generation); Write64(out,s.Sequence);
         out.U32(s.Type); out.U8(s.Bracket); out.U32(s.Min); out.U32(s.Max); out.U8(s.Testing); out.U8(s.InvitationType); out.U32(s.PremadeWaitMs);
+        out.U8(s.ArenaType); out.U8(s.Rated); out.U32(s.MaxRatingDifference); out.U32(s.RatingDiscardMs);
         out.U16(std::uint16_t(s.Groups.size()));
         for(auto const& group:s.Groups)
         {
             Write64(out,group.Id); out.U8(group.Team); out.U8(group.Premade); out.U32(group.WaitMs); out.U16(std::uint16_t(group.Members.size()));
             for(auto member:group.Members) Write64(out,member);
+            Write64(out,group.ArenaTeam); out.U32(group.Rating); out.U32(group.MatchmakerRating);
         }
         out.U16(std::uint16_t(s.Running.size()));
         for(auto const& match:s.Running) { out.U32(match.Instance); out.U32(match.Free[0]); out.U32(match.Free[1]); }
@@ -73,16 +91,18 @@ namespace Skyfire::BattlegroundService
     inline bool DecodeSnapshot(std::vector<std::uint8_t> const& bytes, Snapshot& output)
     {
         if(bytes.size()>MaxFrame) return false;
-        Cluster::Reader in(bytes); Snapshot s; std::uint8_t version,testing; std::uint16_t count;
-        if(!in.U8(version)||version!=1||!in.U32(s.Realm)||!in.String(s.Generation,64)||!Read64(in,s.Sequence)||!in.U32(s.Type)||
-            !in.U8(s.Bracket)||!in.U32(s.Min)||!in.U32(s.Max)||!in.U8(testing)||testing>1||!in.U8(s.InvitationType)||!in.U32(s.PremadeWaitMs)||!in.U16(count)||count>MaxGroups) return false;
-        s.Testing=testing!=0;
+        Cluster::Reader in(bytes); Snapshot s; std::uint8_t version,testing,rated; std::uint16_t count;
+        if(!in.U8(version)||version!=2||!in.U32(s.Realm)||!in.String(s.Generation,64)||!Read64(in,s.Sequence)||!in.U32(s.Type)||
+            !in.U8(s.Bracket)||!in.U32(s.Min)||!in.U32(s.Max)||!in.U8(testing)||testing>1||!in.U8(s.InvitationType)||!in.U32(s.PremadeWaitMs)||
+            !in.U8(s.ArenaType)||!in.U8(rated)||rated>1||!in.U32(s.MaxRatingDifference)||!in.U32(s.RatingDiscardMs)||!in.U16(count)||count>MaxGroups) return false;
+        s.Testing=testing!=0; s.Rated=rated!=0;
         for(unsigned i=0;i<count;++i)
         {
             Group group; std::uint8_t premade; std::uint16_t members;
             if(!Read64(in,group.Id)||!in.U8(group.Team)||!in.U8(premade)||premade>1||!in.U32(group.WaitMs)||!in.U16(members)||members>40) return false;
             group.Premade=premade!=0;
             for(unsigned j=0;j<members;++j) { std::uint64_t member; if(!Read64(in,member)) return false; group.Members.push_back(member); }
+            if(!Read64(in,group.ArenaTeam)||!in.U32(group.Rating)||!in.U32(group.MatchmakerRating)) return false;
             s.Groups.push_back(std::move(group));
         }
         if(!in.U16(count)||count>MaxRunning) return false;

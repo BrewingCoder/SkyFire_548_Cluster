@@ -48,10 +48,93 @@ namespace Skyfire::BattlegroundService
         }
     }
 
+    inline bool RatedArenaCompatible(Snapshot const& snapshot, Group const& first, Group const& second)
+    {
+        auto difference = first.MatchmakerRating > second.MatchmakerRating ?
+            first.MatchmakerRating - second.MatchmakerRating : second.MatchmakerRating - first.MatchmakerRating;
+        return first.ArenaTeam && second.ArenaTeam && first.ArenaTeam != second.ArenaTeam &&
+            (difference <= snapshot.MaxRatingDifference || first.WaitMs >= snapshot.RatingDiscardMs ||
+                second.WaitMs >= snapshot.RatingDiscardMs);
+    }
+
+    inline void PlanArenaMatches(Snapshot const& snapshot, Response& response)
+    {
+        using namespace MatchDetail;
+        Selection remaining;
+        for (auto const& group : snapshot.Groups) remaining.push_back(&group);
+        std::sort(remaining.begin(), remaining.end(), [](auto a, auto b)
+        { return a->WaitMs != b->WaitMs ? a->WaitMs > b->WaitMs : a->Id < b->Id; });
+        while (response.Plans.size() < MaxPlans)
+        {
+            std::array<Selection, 2> selected;
+            if (snapshot.Rated)
+            {
+                for (std::size_t i = 0; i < remaining.size() && selected[0].empty(); ++i)
+                    for (std::size_t j = i + 1; j < remaining.size(); ++j)
+                        if (RatedArenaCompatible(snapshot, *remaining[i], *remaining[j]))
+                        {
+                            unsigned side = remaining[i]->Team == remaining[j]->Team ? 0 : remaining[i]->Team;
+                            selected[side].push_back(remaining[i]);
+                            selected[1 - side].push_back(remaining[j]);
+                            break;
+                        }
+            }
+            else
+            {
+                std::array<Selection, 2> factions;
+                for (auto group : remaining) factions[group->Team].push_back(group);
+                for (unsigned side = 0; side < 2; ++side)
+                {
+                    auto sums = Sums(factions[side], snapshot.Max);
+                    for (auto count = snapshot.Min; count <= snapshot.Max; ++count)
+                        if (sums[count].Possible) { selected[side] = sums[count].Groups; break; }
+                }
+                if (selected[0].empty() || selected[1].empty())
+                {
+                    selected = {};
+                    for (auto const& faction : factions)
+                    {
+                        // Assign each whole group at most once. Arena teams have at
+                        // most five members, so the bounded two-team table is small.
+                        struct Cell { bool Possible = false; std::array<Selection, 2> Teams; };
+                        std::array<std::array<Cell, 6>, 6> sums{};
+                        sums[0][0].Possible = true;
+                        for (auto group : faction)
+                        {
+                            int size = int(group->Members.size());
+                            for (int a = int(snapshot.Max); a >= 0; --a)
+                                for (int b = int(snapshot.Max); b >= 0; --b)
+                                {
+                                    if (sums[a][b].Possible) continue;
+                                    if (a >= size && sums[a-size][b].Possible)
+                                    { sums[a][b] = sums[a-size][b]; sums[a][b].Teams[0].push_back(group); }
+                                    else if (b >= size && sums[a][b-size].Possible)
+                                    { sums[a][b] = sums[a][b-size]; sums[a][b].Teams[1].push_back(group); }
+                                }
+                        }
+                        for (auto a = snapshot.Min; a <= snapshot.Max && selected[0].empty(); ++a)
+                            for (auto b = snapshot.Min; b <= snapshot.Max; ++b)
+                                if (sums[a][b].Possible) { selected = sums[a][b].Teams; break; }
+                        if (!selected[0].empty()) break;
+                    }
+                }
+            }
+            if (selected[0].empty() || selected[1].empty()) break;
+            Plan plan;
+            std::set<std::uint64_t> used;
+            for (unsigned side = 0; side < 2; ++side)
+                for (auto group : selected[side]) { plan.Teams[side].push_back(group->Id); used.insert(group->Id); }
+            response.Plans.push_back(std::move(plan));
+            remaining.erase(std::remove_if(remaining.begin(), remaining.end(),
+                [&](auto group) { return used.count(group->Id); }), remaining.end());
+        }
+    }
+
     inline bool PlanMatches(Snapshot const& snapshot, Response& response)
     {
         response = {}; response.Sequence = snapshot.Sequence;
         if (!ValidSnapshot(snapshot)) return false;
+        if (snapshot.ArenaType) { PlanArenaMatches(snapshot, response); return true; }
         using namespace MatchDetail;
         std::array<Selection,2> normal, premade;
         for (auto const& group : snapshot.Groups)

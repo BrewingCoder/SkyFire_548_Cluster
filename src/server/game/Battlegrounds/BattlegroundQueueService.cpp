@@ -9,23 +9,28 @@
 #include "Player.h"
 #include "Timer.h"
 #include "World.h"
+#include "Group.h"
+#include "Cluster/BattlegroundMatcher.h"
 #include <algorithm>
 #include <memory>
 #include <set>
 
-bool BattlegroundQueue::EligibleRemoteGroup(GroupQueueInfo const& group, BattlegroundTypeId type, BattlegroundBracketId bracket) const
+bool BattlegroundQueue::EligibleRemoteGroup(GroupQueueInfo const& group, BattlegroundTypeId type, BattlegroundBracketId bracket, uint8 arenaType, bool rated) const
 {
     auto* model = sBattlegroundMgr->GetBattlegroundTemplate(type);
-    if (!model || !model->isBattleground() || group.BgTypeId != type || group.IsRated || group.ArenaType ||
-        group.IsInvitedToBGInstanceGUID || !group.RemoteId || group.Players.empty() || group.Players.size() > model->GetMaxPlayersPerTeam()) return false;
-    auto queue = BattlegroundMgr::BGQueueTypeId(type,0);
+    if (!model || (model->isArena() != bool(arenaType)) || group.BgTypeId != type || group.IsRated != rated || group.ArenaType != arenaType ||
+        group.IsInvitedToBGInstanceGUID || !group.RemoteId || group.Players.empty() ||
+        group.Players.size() > (arenaType ? arenaType : model->GetMaxPlayersPerTeam())) return false;
+    if (rated && (!group.ArenaGroup || group.Players.size() < (sBattlegroundMgr->isArenaTesting() ? 1u : arenaType))) return false;
+    auto queue = BattlegroundMgr::BGQueueTypeId(type,arenaType);
     for (auto const& member : group.Players)
     {
         auto* player = ObjectAccessor::FindPlayer(member.first);
         auto local = m_QueuedPlayers.find(member.first);
         if (!player || !player->GetSession() || !player->IsInWorld() || player->InBattleground() || player->GetTeam() != group.Team ||
             !player->CanJoinToBattleground(model) || !player->InBattlegroundQueueForBattlegroundQueueType(queue) ||
-            local == m_QueuedPlayers.end() || local->second.GroupInfo != &group) return false;
+            local == m_QueuedPlayers.end() || local->second.GroupInfo != &group ||
+            (rated && player->GetGroup() != group.ArenaGroup)) return false;
         auto* levelBracket = GetBattlegroundBracketByLevel(model->GetMapId(),player->getLevel());
         if (!levelBracket || levelBracket->GetBracketId() != bracket) return false;
     }
@@ -36,24 +41,28 @@ void BattlegroundQueue::UpdateRemoteQueues()
 {
     if (!Skyfire::BattlegroundService::Enabled()) return;
     for (auto const& context : m_RemoteContexts)
-        SubmitRemoteQueue(BattlegroundTypeId(context.first.first),BattlegroundBracketId(context.first.second));
+        SubmitRemoteQueue(BattlegroundTypeId(std::get<0>(context.first)),BattlegroundBracketId(std::get<1>(context.first)),
+            std::get<2>(context.first),std::get<3>(context.first));
 }
 
-void BattlegroundQueue::SubmitRemoteQueue(BattlegroundTypeId type, BattlegroundBracketId bracket)
+void BattlegroundQueue::SubmitRemoteQueue(BattlegroundTypeId type, BattlegroundBracketId bracket, uint8 arenaType, bool rated)
 {
     namespace Remote = Skyfire::BattlegroundService;
     if (uint8(bracket) >= MAX_BATTLEGROUND_BRACKETS) return;
-    auto& context = m_RemoteContexts[{uint32(type),uint8(bracket)}];
+    auto& context = m_RemoteContexts[{uint32(type),uint8(bracket),arenaType,rated}];
     auto now = std::chrono::steady_clock::now();
     if (context.Pending && now - context.Submitted < std::chrono::seconds(10)) return;
     context.Pending = 0;
     if (now < context.Next) return;
     context.Next = now + std::chrono::seconds(1);
     auto* model = sBattlegroundMgr->GetBattlegroundTemplate(type);
-    if (!model || !model->isBattleground()) return;
+    if (!model || (model->isArena() != bool(arenaType))) return;
     Remote::Snapshot snapshot; snapshot.Realm = realmID; snapshot.Type = uint32(type); snapshot.Bracket = uint8(bracket);
-    snapshot.Testing = sBattlegroundMgr->isTesting();
-    snapshot.Min = snapshot.Testing ? 1 : model->GetMinPlayersPerTeam(); snapshot.Max = model->GetMaxPlayersPerTeam();
+    snapshot.ArenaType = arenaType; snapshot.Rated = rated;
+    snapshot.Testing = arenaType ? sBattlegroundMgr->isArenaTesting() : sBattlegroundMgr->isTesting();
+    snapshot.Min = snapshot.Testing ? 1 : (arenaType ? arenaType : model->GetMinPlayersPerTeam());
+    snapshot.Max = arenaType ? arenaType : model->GetMaxPlayersPerTeam();
+    if (rated) { snapshot.MaxRatingDifference = sBattlegroundMgr->GetMaxRatingDifference(); snapshot.RatingDiscardMs = sBattlegroundMgr->GetRatingDiscardTimer(); }
     snapshot.PremadeWaitMs = sWorld->getIntConfig(WorldIntConfigs::CONFIG_BATTLEGROUND_PREMADE_GROUP_WAIT_FOR_MATCH);
     snapshot.InvitationType = sWorld->getIntConfig(WorldIntConfigs::CONFIG_BATTLEGROUND_INVITATION_TYPE) ? 1 : 0;
     std::size_t members = 0;
@@ -71,15 +80,16 @@ void BattlegroundQueue::SubmitRemoteQueue(BattlegroundTypeId type, BattlegroundB
             if (offsets[list] >= groups.size()) continue;
             more = true;
             auto* group = groups[offsets[list]++];
-            if (!EligibleRemoteGroup(*group,type,bracket) || members + group->Players.size() > Remote::MaxMembers) continue;
+            if (!EligibleRemoteGroup(*group,type,bracket,arenaType,rated) || members + group->Players.size() > Remote::MaxMembers) continue;
             Remote::Group entry; entry.Id = group->RemoteId; entry.Team = group->Team == ALLIANCE ? 0 : 1;
             entry.Premade = list < BG_QUEUE_NORMAL_ALLIANCE; entry.WaitMs = getMSTimeDiff(group->JoinTime,getMSTime());
             for (auto const& player : group->Players) entry.Members.push_back(player.first);
+            if (rated) { entry.ArenaTeam = group->ArenaGroup->GetGUID(); entry.Rating = group->ArenaTeamRating; entry.MatchmakerRating = group->ArenaMatchmakerRating; }
             members += entry.Members.size(); snapshot.Groups.push_back(std::move(entry));
         }
     }
     for (auto* bg : sBattlegroundMgr->GetBGFreeSlotQueueStore(type))
-        if (!bg->ToBeDeleted() && !bg->isRated() && bg->GetTypeID() == type && bg->GetBracketId() == bracket &&
+        if (!arenaType && !bg->ToBeDeleted() && !bg->isRated() && bg->GetTypeID() == type && bg->GetBracketId() == bracket &&
             bg->GetStatus() > STATUS_WAIT_QUEUE && bg->GetStatus() < STATUS_WAIT_LEAVE)
         {
             if (snapshot.Running.size() >= Remote::MaxRunning) break;
@@ -93,7 +103,7 @@ void BattlegroundQueue::HandleRemoteResult(Skyfire::BattlegroundService::Result 
 {
     namespace Remote = Skyfire::BattlegroundService;
     auto const& snapshot = result.Request;
-    auto found = m_RemoteContexts.find({snapshot.Type,snapshot.Bracket});
+    auto found = m_RemoteContexts.find(Remote::KeyFor(snapshot));
     if (found == m_RemoteContexts.end() || !found->second.Pending || found->second.Pending != snapshot.Sequence) return;
     auto& context = found->second; context.Pending = 0;
     if (!Remote::Enabled() || !result.Success || result.Matches.Sequence != snapshot.Sequence ||
@@ -103,14 +113,17 @@ void BattlegroundQueue::HandleRemoteResult(Skyfire::BattlegroundService::Result 
         if (!result.Matches.Plans.empty()) return;
         for (unsigned list = 0; list < BG_QUEUE_GROUP_TYPES_COUNT; ++list)
             for (auto* group : m_QueuedGroups[snapshot.Bracket][list])
-                if (uint32(group->BgTypeId) == snapshot.Type && !group->IsInvitedToBGInstanceGUID) return;
+                if (uint32(group->BgTypeId) == snapshot.Type && group->ArenaType == snapshot.ArenaType && group->IsRated == snapshot.Rated && !group->IsInvitedToBGInstanceGUID) return;
         m_RemoteContexts.erase(found); return;
     }
     auto type = BattlegroundTypeId(snapshot.Type); auto bracket = BattlegroundBracketId(snapshot.Bracket);
+    auto arenaType = snapshot.ArenaType; bool rated = snapshot.Rated;
     auto* model = sBattlegroundMgr->GetBattlegroundTemplate(type);
-    if (!model || !model->isBattleground() || snapshot.Max != model->GetMaxPlayersPerTeam() ||
+    if (!model || model->isArena() != bool(arenaType) || snapshot.Max != (arenaType ? arenaType : model->GetMaxPlayersPerTeam()) ||
         snapshot.InvitationType != (sWorld->getIntConfig(WorldIntConfigs::CONFIG_BATTLEGROUND_INVITATION_TYPE) ? 1 : 0) ||
-        snapshot.Testing != sBattlegroundMgr->isTesting() || snapshot.Min != (snapshot.Testing ? 1 : model->GetMinPlayersPerTeam())) return;
+        snapshot.Testing != (arenaType ? sBattlegroundMgr->isArenaTesting() : sBattlegroundMgr->isTesting()) ||
+        snapshot.Min != (snapshot.Testing ? 1 : (arenaType ? arenaType : model->GetMinPlayersPerTeam()))) return;
+    if (rated && (snapshot.MaxRatingDifference != sBattlegroundMgr->GetMaxRatingDifference() || snapshot.RatingDiscardMs != sBattlegroundMgr->GetRatingDiscardTimer())) return;
     auto* bracketEntry = GetBattlegroundBracketById(model->GetMapId(),bracket);
     if (!bracketEntry) return;
     std::map<uint64,GroupQueueInfo*> current;
@@ -127,16 +140,19 @@ void BattlegroundQueue::HandleRemoteResult(Skyfire::BattlegroundService::Result 
             {
                 auto original = std::find_if(snapshot.Groups.begin(),snapshot.Groups.end(),[&](auto const& group) { return group.Id == id; });
                 auto live = current.find(id);
-                if (!used.insert(id).second || original == snapshot.Groups.end() || live == current.end() || original->Team != team ||
-                    !EligibleRemoteGroup(*live->second,type,bracket) || live->second->Team != (team ? HORDE : ALLIANCE)) return;
+                if (!used.insert(id).second || original == snapshot.Groups.end() || live == current.end() || (!arenaType && original->Team != team) ||
+                    !EligibleRemoteGroup(*live->second,type,bracket,arenaType,rated) || original->Team != (live->second->Team == ALLIANCE ? 0 : 1)) return;
                 std::vector<uint64> members;
                 for (auto const& member : live->second->Players) members.push_back(member.first);
                 if (members != original->Members) return;
+                if (rated && (original->ArenaTeam != live->second->ArenaGroup->GetGUID() || original->Rating != live->second->ArenaTeamRating ||
+                    original->MatchmakerRating != live->second->ArenaMatchmakerRating)) return;
                 counts[team] += uint32(members.size()); item.Teams[team].push_back(live->second);
             }
         if (counts[0] > snapshot.Max || counts[1] > snapshot.Max || (!counts[0] && !counts[1])) return;
         if (plan.Instance)
         {
+            if (arenaType) return;
             if (!instances.insert(plan.Instance).second) return;
             auto original = std::find_if(snapshot.Running.begin(),snapshot.Running.end(),[&](auto const& match) { return match.Instance == plan.Instance; });
             if (original == snapshot.Running.end() || counts[0] > original->Free[0] || counts[1] > original->Free[1]) return;
@@ -156,7 +172,15 @@ void BattlegroundQueue::HandleRemoteResult(Skyfire::BattlegroundService::Result 
         }
         else
         {
-            if (snapshot.Testing ? (!counts[0] && !counts[1]) : (counts[0] < snapshot.Min || counts[1] < snapshot.Min)) return;
+            if (arenaType ? (counts[0] < snapshot.Min || counts[1] < snapshot.Min) :
+                (snapshot.Testing ? (!counts[0] && !counts[1]) : (counts[0] < snapshot.Min || counts[1] < snapshot.Min))) return;
+            if (rated)
+            {
+                if (item.Teams[0].size() != 1 || item.Teams[1].size() != 1) return;
+                auto first = std::find_if(snapshot.Groups.begin(),snapshot.Groups.end(),[&](auto const& g) { return g.Id == item.Teams[0][0]->RemoteId; });
+                auto second = std::find_if(snapshot.Groups.begin(),snapshot.Groups.end(),[&](auto const& g) { return g.Id == item.Teams[1][0]->RemoteId; });
+                if (first == snapshot.Groups.end() || second == snapshot.Groups.end() || !Remote::RatedArenaCompatible(snapshot,*first,*second)) return;
+            }
             if (!snapshot.Testing && snapshot.InvitationType && std::max(counts[0],counts[1]) - std::min(counts[0],counts[1]) > 2) return;
         }
         prepared.push_back(std::move(item));
@@ -168,7 +192,7 @@ void BattlegroundQueue::HandleRemoteResult(Skyfire::BattlegroundService::Result 
     for (auto& item : prepared)
         if (!item.Match)
         {
-            auto* match = sBattlegroundMgr->CreateNewBattleground(type,bracketEntry,0,false);
+            auto* match = sBattlegroundMgr->CreateNewBattleground(type,bracketEntry,arenaType,rated);
             if (!match) return;
             created.emplace_back(match,[](Battleground* abandoned) { abandoned->StartBattleground(); abandoned->SetDeleteThis(); });
             item.Match = match;
@@ -176,13 +200,32 @@ void BattlegroundQueue::HandleRemoteResult(Skyfire::BattlegroundService::Result 
             {
                 uint32 count = 0;
                 for (auto* group : item.Teams[team]) count += uint32(group->Players.size());
-                if (count > match->GetMaxPlayersPerTeam() || (!snapshot.Testing && count < match->GetMinPlayersPerTeam())) return;
+                if (count > (arenaType ? arenaType : match->GetMaxPlayersPerTeam()) || (!snapshot.Testing && count < (arenaType ? arenaType : match->GetMinPlayersPerTeam()))) return;
             }
         }
     for (auto& item : prepared)
     {
+        if (rated)
+        {
+            auto* first = item.Teams[0][0]; auto* second = item.Teams[1][0];
+            first->OpponentsTeamRating = second->ArenaTeamRating; second->OpponentsTeamRating = first->ArenaTeamRating;
+            first->OpponentsMatchmakerRating = second->ArenaMatchmakerRating; second->OpponentsMatchmakerRating = first->ArenaMatchmakerRating;
+            item.Match->SetArenaMatchmakerRating(ALLIANCE, first->ArenaMatchmakerRating);
+            item.Match->SetArenaMatchmakerRating(HORDE, second->ArenaMatchmakerRating);
+        }
         for (unsigned team = 0; team < 2; ++team)
-            for (auto* group : item.Teams[team]) InviteGroupToBG(group,item.Match,team ? HORDE : ALLIANCE);
+            for (auto* group : item.Teams[team])
+            {
+                auto side = team ? HORDE : ALLIANCE;
+                if (arenaType && group->Team != side)
+                {
+                    auto base = rated ? BG_QUEUE_PREMADE_ALLIANCE : BG_QUEUE_NORMAL_ALLIANCE;
+                    auto& previous = m_QueuedGroups[snapshot.Bracket][base + (group->Team == ALLIANCE ? 0 : 1)];
+                    previous.erase(std::remove(previous.begin(),previous.end(),group),previous.end());
+                    m_QueuedGroups[snapshot.Bracket][base + team].push_back(group);
+                }
+                InviteGroupToBG(group,item.Match,side);
+            }
         if (!item.Match->HasFreeSlots()) item.Match->RemoveFromBGFreeSlotQueue();
     }
     for (auto& match : created) { match->StartBattleground(); match.release(); }

@@ -1,9 +1,25 @@
 # Battleground matchmaking service
 
-The first phase moves unrated battleground queue selection to the native
+Queue selection for unrated battlegrounds and 2v2, 3v3 and 5v5 arenas runs in the native
 `battlegroundserver` process. Worldserver still admits players to queues, validates
 eligibility, sends invitations, creates instances, teleports players, and runs
-combat. Arenas and rated matchmaking retain their existing worldserver path.
+combat. Rated arena proposals include group identity and matchmaker ratings;
+worldserver revalidates those values and retains opponent ratings for the match.
+Rated battlegrounds retain their existing worldserver path.
+
+Rebuild and install **worldserver and battlegroundserver together** for this slice.
+Snapshot format 2 adds arena size, rated mode and rating policy. Older daemons
+reject the new snapshots; matchmaking waits for a compatible service and does not
+fall back to local matching. There are no new configuration keys or SQL migrations.
+
+Queues are isolated by realm, battleground type, bracket, arena size and rated mode.
+Skirmishes prefer opposite factions, then form same-faction teams without splitting
+groups. Rated arenas pair whole teams, oldest eligible first, using the configured
+maximum MMR difference until either team's rating-discard timer expires. They never
+pair the same arena group against itself. Arena matches require two teams even in
+testing mode, which lowers the required team size to one. Running arenas are never
+backfilled. Invitation acceptance/expiry, rating changes, rewards and combat remain
+authoritative in worldserver; durable service failover is a later slice.
 
 Build and install the normal server targets. INSTALL includes `battlegroundserver`
 and `battlegroundserver.conf.dist`. Copy the distribution configuration to

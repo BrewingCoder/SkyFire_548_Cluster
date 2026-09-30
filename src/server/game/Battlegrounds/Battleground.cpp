@@ -7,6 +7,7 @@
 #include "ArenaTeamMgr.h"
 #include "Battleground.h"
 #include "BattlegroundMgr.h"
+#include "BattlegroundMessage.h"
 #include "BattlePetMgr.h"
 #include "Chat.h"
 #include "Creature.h"
@@ -56,7 +57,8 @@ namespace Skyfire
     private:
         void do_helper(WorldPacket& data, char const* text)
         {
-            ChatHandler::BuildChatPacket(data, _msgtype, Language::LANG_UNIVERSAL, _source, _target, text);
+            std::string message = FormatBattlegroundPlayerName(text, _source ? _source->GetName() : "");
+            ChatHandler::BuildChatPacket(data, _msgtype, Language::LANG_UNIVERSAL, _source, _target, message);
         }
 
         ChatMsg _msgtype;
@@ -81,7 +83,8 @@ namespace Skyfire
             char str[2048];
             snprintf(str, sizeof(str), text, arg1str, arg2str);
 
-            ChatHandler::BuildChatPacket(data, _msgtype, Language::LANG_UNIVERSAL, _source, _target, str);
+            std::string message = FormatBattlegroundPlayerName(str, _source ? _source->GetName() : "");
+            ChatHandler::BuildChatPacket(data, _msgtype, Language::LANG_UNIVERSAL, _source, _target, message);
         }
 
     private:

@@ -25,7 +25,7 @@ namespace Skyfire::BattlegroundService
             std::string Node, Generation;
             std::uint64_t Updated=0;
             std::set<std::string> Retired;
-            std::map<std::pair<std::uint32_t,std::uint8_t>,Queue> Queues;
+            std::map<QueueKey,Queue> Queues;
         };
         std::map<std::uint32_t,Owner> Realms;
         std::string Error;
@@ -54,7 +54,7 @@ namespace Skyfire::BattlegroundService
                 if (owner.Retired.size()>=4096) return reject("Queue generation history full; stop realm worlds before restarting the battleground daemon");
             }
             if (!replacing && now<owner.Updated) return reject("Queue clock moved backwards");
-            auto key=std::make_pair(snapshot.Type,snapshot.Bracket);
+            auto key=KeyFor(snapshot);
             auto queue=owner.Queues.find(key);
             if (!replacing && queue!=owner.Queues.end() && snapshot.Sequence<=queue->second.Sequence) return reject("Queue snapshot replay");
             if (!replacing && queue==owner.Queues.end() && owner.Queues.size()>=256) return reject("Queue type/bracket capacity reached");
