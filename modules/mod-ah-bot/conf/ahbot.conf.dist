@@ -1,0 +1,111 @@
+[worldserver]
+
+########################################
+# mod-ah-bot configuration
+#
+# Fakes an auction-house economy on small/family servers.
+#   SELLER keeps each house stocked with reasonably-priced listings.
+#   BUYER  buys player listings priced at/under a fraction of their value.
+#
+# Pricing basis: item vendor SellPrice x multiplier.
+# After changing values: `.reload config` then `.ahbot reload` (in-game),
+# or restart the worldserver.
+########################################
+
+#
+#    AuctionHouseBot.Enable
+#        Master switch. Off by default so the module is inert until configured.
+#        Default: 0
+
+AuctionHouseBot.Enable = 0
+
+#
+#    AuctionHouseBot.Character.GUID / .Name
+#        The character that owns bot auctions and receives bought items + gold.
+#        Create a normal (ideally level-1, parked) character for this, then set
+#        either its GUID (preferred) or its exact Name. GUID wins if non-zero.
+#        The character must exist or the bot refuses to start.
+#        Default: GUID 0, Name "Auctioneer"
+
+AuctionHouseBot.Character.GUID = 0
+AuctionHouseBot.Character.Name = "Auctioneer"
+
+#
+#    AuctionHouseBot.House.Alliance / .Horde / .Neutral
+#        Which auction houses the bot operates in. Each needs at least one
+#        spawned auctioneer NPC of that faction (auto-discovered). With
+#        AllowTwoSide.Interaction.Auction enabled, all collapse to Neutral.
+#        Default: 1 / 1 / 1
+
+AuctionHouseBot.House.Alliance = 1
+AuctionHouseBot.House.Horde = 1
+AuctionHouseBot.House.Neutral = 1
+
+########################################
+# Seller
+########################################
+#
+#    AuctionHouseBot.Seller.Enable
+#        Default: 1
+#    AuctionHouseBot.Seller.Target
+#        Desired number of live auctions to maintain per house.
+#        Default: 150
+#    AuctionHouseBot.Seller.PerCycle
+#        Max new listings created per house per cycle (ramps up to Target).
+#        Default: 10
+#    AuctionHouseBot.Seller.PriceMultiplier
+#        buyout = item SellPrice x stack count x this. (the "reasonable rate" knob)
+#        Default: 1.5
+#    AuctionHouseBot.Seller.MinQuality / .MaxQuality
+#        Item quality range to list. 0=Poor 1=Common 2=Uncommon 3=Rare 4=Epic
+#        5=Legendary 6=Artifact. Default: 1 .. 4
+#    AuctionHouseBot.Seller.MaxItemLevel
+#        Skip items above this ilvl. 0 = no cap. Default: 0
+#    AuctionHouseBot.Seller.MaxStack
+#        Cap on the random stack size for stackable items. Default: 5
+#    AuctionHouseBot.Seller.DurationHours
+#        Listing duration. Default: 24
+
+AuctionHouseBot.Seller.Enable = 1
+AuctionHouseBot.Seller.Target = 150
+AuctionHouseBot.Seller.PerCycle = 10
+AuctionHouseBot.Seller.PriceMultiplier = 1.5
+AuctionHouseBot.Seller.MinQuality = 1
+AuctionHouseBot.Seller.MaxQuality = 4
+AuctionHouseBot.Seller.MaxItemLevel = 0
+AuctionHouseBot.Seller.MaxStack = 5
+AuctionHouseBot.Seller.DurationHours = 24
+
+########################################
+# Buyer
+########################################
+#
+#    AuctionHouseBot.Buyer.Enable
+#        Default: 1
+#    AuctionHouseBot.Buyer.PriceMultiplier
+#        Buy a player listing when its buyout <= (SellPrice x count) x this.
+#        Raise it to be a more generous buyer. (the "reasonable rate" knob)
+#        Default: 1.0
+#    AuctionHouseBot.Buyer.PerCycle
+#        Max buyouts per house per cycle. Default: 10
+#    AuctionHouseBot.Buyer.MinQuality
+#        Ignore listings below this quality. Default: 0 (buy everything)
+#    AuctionHouseBot.Buyer.MaxPrice
+#        Never buy a listing dearer than this (copper). 0 = no cap.
+#        Default: 5000000 (500g)
+
+AuctionHouseBot.Buyer.Enable = 1
+AuctionHouseBot.Buyer.PriceMultiplier = 1.0
+AuctionHouseBot.Buyer.PerCycle = 10
+AuctionHouseBot.Buyer.MinQuality = 0
+AuctionHouseBot.Buyer.MaxPrice = 5000000
+
+########################################
+# Timing
+########################################
+#
+#    AuctionHouseBot.TickSeconds
+#        Seconds between bot cycles (seller top-up + buyer sweep). Min 10.
+#        Default: 120
+
+AuctionHouseBot.TickSeconds = 120
