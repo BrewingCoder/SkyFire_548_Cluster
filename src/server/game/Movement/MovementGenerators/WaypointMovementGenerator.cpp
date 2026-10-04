@@ -8,6 +8,7 @@
 //Extended headers
 #include "ObjectMgr.h"
 #include "World.h"
+#include "Config.h"   // [lab] Rate.Flight.Speed taxi multiplier
 #include "Transport.h"
 //Flightmaster grid preloading
 #include "MapManager.h"
@@ -266,7 +267,8 @@ void FlightPathMovementGenerator::DoReset(Player* player)
     init.SetSmooth();
     init.SetUncompressed();
     init.SetWalk(true);
-    init.SetVelocity(PLAYER_FLIGHT_SPEED);
+    // [lab] configurable taxi speed multiplier (Rate.Flight.Speed, default 1.0)
+    init.SetVelocity(PLAYER_FLIGHT_SPEED * sConfigMgr->GetFloatDefault("Rate.Flight.Speed", 1.0f));
     init.Launch();
 }
 
