@@ -25,10 +25,10 @@ AuctionHouseBot.Enable = 0
 #        Create a normal (ideally level-1, parked) character for this, then set
 #        either its GUID (preferred) or its exact Name. GUID wins if non-zero.
 #        The character must exist or the bot refuses to start.
-#        Default: GUID 0, Name "Auctioneer"
+#        Default: GUID 0, Name "Brewer"
 
 AuctionHouseBot.Character.GUID = 0
-AuctionHouseBot.Character.Name = "Auctioneer"
+AuctionHouseBot.Character.Name = "Brewer"
 
 #
 #    AuctionHouseBot.House.Alliance / .Horde / .Neutral
@@ -47,18 +47,16 @@ AuctionHouseBot.House.Neutral = 1
 #
 #    AuctionHouseBot.Seller.Enable
 #        Default: 1
-#    AuctionHouseBot.Seller.Target
-#        Desired number of live auctions to maintain per house.
-#        Default: 150
 #    AuctionHouseBot.Seller.PerCycle
-#        Max new listings created per house per cycle (ramps up to Target).
-#        Default: 10
+#        Max new listings created per house per cycle (how fast it ramps up to
+#        the per-category targets below). Default: 20
 #    AuctionHouseBot.Seller.PriceMultiplier
 #        buyout = item SellPrice x stack count x this. (the "reasonable rate" knob)
 #        Default: 1.5
 #    AuctionHouseBot.Seller.MinQuality / .MaxQuality
-#        Item quality range to list. 0=Poor 1=Common 2=Uncommon 3=Rare 4=Epic
-#        5=Legendary 6=Artifact. Default: 1 .. 4
+#        Quality range for the bulk per-category stock. 0=Poor 1=Common
+#        2=Uncommon 3=Rare 4=Epic. (Legendaries are handled separately below.)
+#        Default: 1 .. 4
 #    AuctionHouseBot.Seller.MaxItemLevel
 #        Skip items above this ilvl. 0 = no cap. Default: 0
 #    AuctionHouseBot.Seller.MaxStack
@@ -67,14 +65,37 @@ AuctionHouseBot.House.Neutral = 1
 #        Listing duration. Default: 24
 
 AuctionHouseBot.Seller.Enable = 1
-AuctionHouseBot.Seller.Target = 150
-AuctionHouseBot.Seller.PerCycle = 10
+AuctionHouseBot.Seller.PerCycle = 20
 AuctionHouseBot.Seller.PriceMultiplier = 1.5
 AuctionHouseBot.Seller.MinQuality = 1
 AuctionHouseBot.Seller.MaxQuality = 4
 AuctionHouseBot.Seller.MaxItemLevel = 0
 AuctionHouseBot.Seller.MaxStack = 5
 AuctionHouseBot.Seller.DurationHours = 24
+
+#
+#    Per-category stock targets - how many of each category to keep live in
+#    EACH house. The bot tops these up every cycle (bounded by PerCycle).
+#    Materials and Weapons/Armor are intentionally large.
+
+AuctionHouseBot.Seller.Count.Materials = 80
+AuctionHouseBot.Seller.Count.Weapons = 50
+AuctionHouseBot.Seller.Count.Armor = 50
+AuctionHouseBot.Seller.Count.Consumables = 25
+AuctionHouseBot.Seller.Count.Recipes = 15
+AuctionHouseBot.Seller.Count.Gems = 15
+AuctionHouseBot.Seller.Count.Glyphs = 10
+AuctionHouseBot.Seller.Count.Containers = 8
+AuctionHouseBot.Seller.Count.Projectiles = 5
+AuctionHouseBot.Seller.Count.Misc = 8
+
+#
+#    Legendary guarantee - keep at least this many Legendary (quality 5+)
+#    listings live in EACH house. Most legendaries are bind-on-pickup with no
+#    vendor price, so they use a flat price floor (copper) instead of SellPrice.
+
+AuctionHouseBot.Seller.Legendary.Min = 2
+AuctionHouseBot.Seller.Legendary.Price = 5000000
 
 ########################################
 # Buyer

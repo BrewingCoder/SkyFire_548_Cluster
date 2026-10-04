@@ -5,17 +5,19 @@
 * mod-ah-bot - Auction House Bot
 * -----------------------------------------------------------------------------
 * Fakes a living auction-house economy on a small/family server:
-*   * SELLER  - keeps each auction house topped up with reasonably-priced
-*               listings so players can buy gear/mats they never looted.
+*   * SELLER  - keeps each auction house stocked per item CATEGORY (Materials,
+*               Weapons, Armor, ...) up to configurable per-category targets,
+*               and guarantees a minimum number of Legendary listings per house.
 *   * BUYER   - sweeps player listings and buys anything priced at or below a
 *               configurable fraction of its value, so players can always
 *               offload loot for gold.
 *
-* All behaviour is driven by conf/ahbot.conf.dist and can be tuned live with
-* `.reload config` + `.ahbot reload` - no rebuild needed for the knobs.
+* All behaviour is driven by conf/ahbot.conf.dist (or the worldserver.conf
+* overrides) and can be tuned live with `.reload config` + `.ahbot reload`.
 *
-* Pricing basis: item vendor SellPrice x multiplier (per design decision).
-* Buyer scope:   everything under threshold (per design decision).
+* Pricing basis: item vendor SellPrice x stack x multiplier (per design).
+*                Legendaries use a price floor since most have no vendor price.
+* Buyer scope:   everything under threshold (per design).
 * AH scope:      Alliance, Horde and Neutral houses (auto-discovered).
 */
 
@@ -33,13 +35,66 @@
 #include "RBAC.h"
 #include "Util.h"
 #include <vector>
+#include <string>
 #include <ctime>
-
-// UNIT_NPC_FLAG_AUCTIONEER (Unit.h) - duplicated here to avoid pulling Unit.h.
-#define AHBOT_NPCFLAG_AUCTIONEER 0x00200000
 
 namespace
 {
+    // ---- Item categories ----------------------------------------------------
+    enum AhbCategory
+    {
+        CAT_MATERIALS = 0,   // trade goods + reagents
+        CAT_WEAPONS,
+        CAT_ARMOR,
+        CAT_CONSUMABLES,
+        CAT_RECIPES,
+        CAT_GEMS,
+        CAT_GLYPHS,
+        CAT_CONTAINERS,      // bags + quivers
+        CAT_PROJECTILES,
+        CAT_MISC,
+        CAT_COUNT
+    };
+
+    char const* CategoryName(uint8 c)
+    {
+        switch (c)
+        {
+            case CAT_MATERIALS:   return "Materials";
+            case CAT_WEAPONS:     return "Weapons";
+            case CAT_ARMOR:       return "Armor";
+            case CAT_CONSUMABLES: return "Consumables";
+            case CAT_RECIPES:     return "Recipes";
+            case CAT_GEMS:        return "Gems";
+            case CAT_GLYPHS:      return "Glyphs";
+            case CAT_CONTAINERS:  return "Containers";
+            case CAT_PROJECTILES: return "Projectiles";
+            case CAT_MISC:        return "Misc";
+            default:              return "?";
+        }
+    }
+
+    // Map an item class to one of our categories, or CAT_COUNT if not listable.
+    uint8 CategoryOf(ItemTemplate const& p)
+    {
+        switch (p.Class)
+        {
+            case ITEM_CLASS_TRADE_GOODS:
+            case ITEM_CLASS_REAGENT:        return CAT_MATERIALS;
+            case ITEM_CLASS_WEAPON:         return CAT_WEAPONS;
+            case ITEM_CLASS_ARMOR:          return CAT_ARMOR;
+            case ITEM_CLASS_CONSUMABLE:     return CAT_CONSUMABLES;
+            case ITEM_CLASS_RECIPE:         return CAT_RECIPES;
+            case ITEM_CLASS_GEM:            return CAT_GEMS;
+            case ITEM_CLASS_GLYPH:          return CAT_GLYPHS;
+            case ITEM_CLASS_CONTAINER:
+            case ITEM_CLASS_QUIVER:         return CAT_CONTAINERS;
+            case ITEM_CLASS_PROJECTILE:     return CAT_PROJECTILES;
+            case ITEM_CLASS_MISCELLANEOUS:  return CAT_MISC;
+            default:                        return CAT_COUNT;   // quest/key/money/etc.
+        }
+    }
+
     // ---- Configuration ------------------------------------------------------
     struct AHBotConfig
     {
@@ -51,23 +106,29 @@ namespace
         bool   HouseNeutral    = true;
 
         uint32 BotCharGuid     = 0;                 // resolved character low GUID
-        std::string BotCharName = "Auctioneer";     // used if BotCharGuid == 0
+        std::string BotCharName = "Brewer";         // used if BotCharGuid == 0
 
-        // seller
-        uint32 SellerTarget    = 150;               // desired live listings per house
-        uint32 SellerPerCycle  = 10;                // max new listings per house per tick
+        // seller - general
+        uint32 SellerPerCycle  = 20;                // max new listings per house per tick
         float  SellPriceMult   = 1.5f;              // buyout = SellPrice * count * this
         uint32 SellMinQuality  = 1;                 // ITEM_QUALITY_NORMAL
-        uint32 SellMaxQuality  = 4;                 // ITEM_QUALITY_EPIC
-        uint32 SellMaxItemLevel = 0;                // 0 = no cap
+        uint32 SellMaxQuality  = 4;                 // ITEM_QUALITY_EPIC (legendaries via floor)
+        uint32 SellMaxItemLevel = 0;               // 0 = no cap
         uint32 SellMaxStack    = 5;                 // cap on random stack size
         uint32 SellDurationHrs = 24;
+
+        // seller - per-category stock targets (kept live per house)
+        uint32 CatTarget[CAT_COUNT] = { 80, 50, 50, 25, 15, 15, 10, 8, 5, 8 };
+
+        // seller - legendary guarantee
+        uint32 LegendaryMin    = 2;                 // keep >= this many q5 listings per house
+        uint64 LegendaryPrice  = 5000000;           // floor buyout for legendaries (copper)
 
         // buyer
         float  BuyPriceMult    = 1.0f;              // buy if buyout <= value * this
         uint32 BuyPerCycle     = 10;                // max buyouts per house per tick
         uint32 BuyMinQuality   = 0;                 // consider all by default
-        uint64 BuyMaxPrice     = 5000000;           // never buy a listing dearer than this (copper); 0 = no cap
+        uint64 BuyMaxPrice     = 5000000;           // never buy a listing dearer than this; 0 = no cap
 
         uint32 TickSeconds     = 120;
     };
@@ -85,7 +146,8 @@ namespace
     };
 
     std::vector<AHBotHouse> g_houses;
-    std::vector<uint32>     g_pool;       // eligible item entries for the seller
+    std::vector<uint32>     g_poolByCat[CAT_COUNT];  // eligible entries per category
+    std::vector<uint32>     g_poolLegendary;         // q5+ entries (relaxed bind)
     bool                    g_initialized = false;
     uint32                  g_accumMs = 0;
 
@@ -94,6 +156,24 @@ namespace
         if (hi <= lo)
             return lo;
         return lo + uint32(rand_norm() * double(hi - lo + 1));
+    }
+
+    const char* CatCfgKey(uint8 c)
+    {
+        switch (c)
+        {
+            case CAT_MATERIALS:   return "AuctionHouseBot.Seller.Count.Materials";
+            case CAT_WEAPONS:     return "AuctionHouseBot.Seller.Count.Weapons";
+            case CAT_ARMOR:       return "AuctionHouseBot.Seller.Count.Armor";
+            case CAT_CONSUMABLES: return "AuctionHouseBot.Seller.Count.Consumables";
+            case CAT_RECIPES:     return "AuctionHouseBot.Seller.Count.Recipes";
+            case CAT_GEMS:        return "AuctionHouseBot.Seller.Count.Gems";
+            case CAT_GLYPHS:      return "AuctionHouseBot.Seller.Count.Glyphs";
+            case CAT_CONTAINERS:  return "AuctionHouseBot.Seller.Count.Containers";
+            case CAT_PROJECTILES: return "AuctionHouseBot.Seller.Count.Projectiles";
+            case CAT_MISC:        return "AuctionHouseBot.Seller.Count.Misc";
+            default:              return "";
+        }
     }
 
     void LoadConfig()
@@ -106,16 +186,22 @@ namespace
         g_cfg.HouseNeutral   = sConfigMgr->GetBoolDefault("AuctionHouseBot.House.Neutral", true);
 
         g_cfg.BotCharGuid    = uint32(sConfigMgr->GetIntDefault("AuctionHouseBot.Character.GUID", 0));
-        g_cfg.BotCharName    = sConfigMgr->GetStringDefault("AuctionHouseBot.Character.Name", "Auctioneer");
+        g_cfg.BotCharName    = sConfigMgr->GetStringDefault("AuctionHouseBot.Character.Name", "Brewer");
 
-        g_cfg.SellerTarget   = uint32(sConfigMgr->GetIntDefault("AuctionHouseBot.Seller.Target", 150));
-        g_cfg.SellerPerCycle = uint32(sConfigMgr->GetIntDefault("AuctionHouseBot.Seller.PerCycle", 10));
+        g_cfg.SellerPerCycle = uint32(sConfigMgr->GetIntDefault("AuctionHouseBot.Seller.PerCycle", 20));
         g_cfg.SellPriceMult  = sConfigMgr->GetFloatDefault("AuctionHouseBot.Seller.PriceMultiplier", 1.5f);
         g_cfg.SellMinQuality = uint32(sConfigMgr->GetIntDefault("AuctionHouseBot.Seller.MinQuality", 1));
         g_cfg.SellMaxQuality = uint32(sConfigMgr->GetIntDefault("AuctionHouseBot.Seller.MaxQuality", 4));
         g_cfg.SellMaxItemLevel = uint32(sConfigMgr->GetIntDefault("AuctionHouseBot.Seller.MaxItemLevel", 0));
         g_cfg.SellMaxStack   = uint32(sConfigMgr->GetIntDefault("AuctionHouseBot.Seller.MaxStack", 5));
         g_cfg.SellDurationHrs = uint32(sConfigMgr->GetIntDefault("AuctionHouseBot.Seller.DurationHours", 24));
+
+        uint32 defaults[CAT_COUNT] = { 80, 50, 50, 25, 15, 15, 10, 8, 5, 8 };
+        for (uint8 c = 0; c < CAT_COUNT; ++c)
+            g_cfg.CatTarget[c] = uint32(sConfigMgr->GetIntDefault(CatCfgKey(c), int(defaults[c])));
+
+        g_cfg.LegendaryMin   = uint32(sConfigMgr->GetIntDefault("AuctionHouseBot.Seller.Legendary.Min", 2));
+        g_cfg.LegendaryPrice = uint64(sConfigMgr->GetIntDefault("AuctionHouseBot.Seller.Legendary.Price", 5000000));
 
         g_cfg.BuyPriceMult   = sConfigMgr->GetFloatDefault("AuctionHouseBot.Buyer.PriceMultiplier", 1.0f);
         g_cfg.BuyPerCycle    = uint32(sConfigMgr->GetIntDefault("AuctionHouseBot.Buyer.PerCycle", 10));
@@ -129,11 +215,15 @@ namespace
             g_cfg.SellMaxStack = 1;
     }
 
+    bool ClassWhitelisted(ItemTemplate const& proto)
+    {
+        return CategoryOf(proto) != CAT_COUNT;
+    }
+
+    // Eligible for a normal (per-category) listing.
     bool ItemEligibleForSeller(ItemTemplate const& proto)
     {
-        if (proto.Name1.empty())
-            return false;
-        if (proto.SellPrice == 0)
+        if (proto.Name1.empty() || proto.SellPrice == 0)
             return false;
         if (proto.Quality < g_cfg.SellMinQuality || proto.Quality > g_cfg.SellMaxQuality)
             return false;
@@ -152,39 +242,62 @@ namespace
             default:
                 return false;   // BoP / quest-bound
         }
-
-        switch (proto.Class)
-        {
-            case ITEM_CLASS_CONSUMABLE:
-            case ITEM_CLASS_CONTAINER:
-            case ITEM_CLASS_WEAPON:
-            case ITEM_CLASS_GEM:
-            case ITEM_CLASS_ARMOR:
-            case ITEM_CLASS_REAGENT:
-            case ITEM_CLASS_PROJECTILE:
-            case ITEM_CLASS_TRADE_GOODS:
-            case ITEM_CLASS_RECIPE:
-            case ITEM_CLASS_QUIVER:
-            case ITEM_CLASS_MISCELLANEOUS:
-            case ITEM_CLASS_GLYPH:
-                return true;
-            default:
-                return false;   // quest, key, money, etc.
-        }
+        return ClassWhitelisted(proto);
     }
 
-    void BuildItemPool()
+    // Eligible for the legendary guarantee pool (bind rules relaxed so there is
+    // actually inventory - most legendaries are BoP).
+    bool ItemEligibleLegendary(ItemTemplate const& proto)
     {
-        g_pool.clear();
+        if (proto.Name1.empty())
+            return false;
+        if (proto.Quality < ITEM_QUALITY_LEGENDARY)   // 5+ (legendary, artifact)
+            return false;
+        if (proto.Flags & ITEM_PROTO_FLAG_CONJURED)
+            return false;
+        return ClassWhitelisted(proto);
+    }
+
+    void BuildItemPools()
+    {
+        for (uint8 c = 0; c < CAT_COUNT; ++c)
+            g_poolByCat[c].clear();
+        g_poolLegendary.clear();
+
         ItemTemplateContainer const* store = sObjectMgr->GetItemTemplateStore();
         if (!store)
             return;
 
         for (ItemTemplateContainer::const_iterator itr = store->begin(); itr != store->end(); ++itr)
-            if (ItemEligibleForSeller(itr->second))
-                g_pool.push_back(itr->first);
+        {
+            ItemTemplate const& proto = itr->second;
+            if (ItemEligibleForSeller(proto))
+            {
+                uint8 cat = CategoryOf(proto);
+                if (cat < CAT_COUNT)
+                    g_poolByCat[cat].push_back(itr->first);
+            }
+            if (ItemEligibleLegendary(proto))
+                g_poolLegendary.push_back(itr->first);
+        }
 
-        SF_LOG_INFO("modules", "[mod-ah-bot] seller item pool built: %u eligible item templates.", uint32(g_pool.size()));
+        SF_LOG_INFO("modules", "[mod-ah-bot] pools built: Mats=%u Wpn=%u Armor=%u Cons=%u Rec=%u Gem=%u Gly=%u Cont=%u Proj=%u Misc=%u Legendary=%u.",
+            uint32(g_poolByCat[CAT_MATERIALS].size()), uint32(g_poolByCat[CAT_WEAPONS].size()),
+            uint32(g_poolByCat[CAT_ARMOR].size()), uint32(g_poolByCat[CAT_CONSUMABLES].size()),
+            uint32(g_poolByCat[CAT_RECIPES].size()), uint32(g_poolByCat[CAT_GEMS].size()),
+            uint32(g_poolByCat[CAT_GLYPHS].size()), uint32(g_poolByCat[CAT_CONTAINERS].size()),
+            uint32(g_poolByCat[CAT_PROJECTILES].size()), uint32(g_poolByCat[CAT_MISC].size()),
+            uint32(g_poolLegendary.size()));
+    }
+
+    bool PoolsEmpty()
+    {
+        if (!g_poolLegendary.empty())
+            return false;
+        for (uint8 c = 0; c < CAT_COUNT; ++c)
+            if (!g_poolByCat[c].empty())
+                return false;
+        return true;
     }
 
     // Resolve the bot's character low GUID from config (GUID first, then name).
@@ -212,7 +325,6 @@ namespace
     {
         g_houses.clear();
 
-        // Target houses keyed by a representative faction template id.
         struct Target { uint32 ftid; bool enabled; char const* label; };
         Target targets[3] =
         {
@@ -221,7 +333,6 @@ namespace
             { 120, g_cfg.HouseNeutral,  "Neutral"  },  // booty bay
         };
 
-        // Pull every spawned auctioneer and remember one guid per distinct house object.
         QueryResult result = WorldDatabase.Query(
             "SELECT c.guid, ct.faction_A FROM creature c "
             "JOIN creature_template ct ON c.id = ct.entry "
@@ -233,7 +344,6 @@ namespace
             return;
         }
 
-        // Buffer all auctioneers once (QueryResult is forward-only).
         struct Auctioneer { uint32 guid; uint32 faction; };
         std::vector<Auctioneer> auctioneers;
         do
@@ -249,14 +359,12 @@ namespace
 
             AuctionHouseObject* wantObj = sAuctionMgr->GetAuctionsMap(targets[i].ftid);
 
-            // Skip a house we already registered (two-side-interaction collapses all to neutral).
             bool dup = false;
             for (AHBotHouse const& h : g_houses)
                 if (h.Object == wantObj) { dup = true; break; }
             if (dup)
                 continue;
 
-            // Find an auctioneer whose faction maps to this house object.
             uint32 chosenGuid = 0;
             uint32 chosenFaction = 0;
             for (Auctioneer const& au : auctioneers)
@@ -297,96 +405,133 @@ namespace
         if (g_initialized)
             return true;
 
-        BuildItemPool();
+        BuildItemPools();
         DiscoverHouses();
         g_cfg.BotCharGuid = ResolveBotGuid();
 
-        if (!g_cfg.BotCharGuid || g_houses.empty() || g_pool.empty())
+        if (!g_cfg.BotCharGuid || g_houses.empty() || PoolsEmpty())
         {
-            SF_LOG_ERROR("modules", "[mod-ah-bot] not ready (bot guid=%u, houses=%u, pool=%u) - will retry next tick.",
-                g_cfg.BotCharGuid, uint32(g_houses.size()), uint32(g_pool.size()));
+            SF_LOG_ERROR("modules", "[mod-ah-bot] not ready (bot guid=%u, houses=%u) - will retry next tick.",
+                g_cfg.BotCharGuid, uint32(g_houses.size()));
             return false;
         }
 
         g_initialized = true;
-        SF_LOG_INFO("modules", "[mod-ah-bot] initialized. bot guid=%u, houses=%u, pool=%u.",
-            g_cfg.BotCharGuid, uint32(g_houses.size()), uint32(g_pool.size()));
+        SF_LOG_INFO("modules", "[mod-ah-bot] initialized. bot guid=%u, houses=%u.",
+            g_cfg.BotCharGuid, uint32(g_houses.size()));
+        return true;
+    }
+
+    // Create and persist one listing of the given item entry in the house.
+    bool CreateListing(AHBotHouse const& house, uint32 entry, bool legendary)
+    {
+        ItemTemplate const* proto = sObjectMgr->GetItemTemplate(entry);
+        if (!proto)
+            return false;
+
+        uint32 maxStack = proto->GetMaxStackSize();
+        uint32 cap = g_cfg.SellMaxStack;
+        if (maxStack < cap)
+            cap = maxStack;
+        if (cap < 1)
+            cap = 1;
+        uint32 count = RandBetween(1, cap);
+
+        Item* item = Item::CreateItem(entry, count, nullptr);
+        if (!item)
+            return false;
+        item->SetOwnerGUID(MAKE_NEW_GUID(g_cfg.BotCharGuid, 0, HIGHGUID_PLAYER));
+
+        uint64 buyout = uint64(double(proto->SellPrice) * double(count) * double(g_cfg.SellPriceMult));
+        if (legendary && buyout < g_cfg.LegendaryPrice)
+            buyout = g_cfg.LegendaryPrice;
+        if (buyout < 1)
+        {
+            // non-legendary with no vendor price: skip
+            delete item;
+            return false;
+        }
+        uint64 startbid = uint64(double(buyout) * frand(0.5f, 0.9f));
+        if (startbid < 1)
+            startbid = 1;
+
+        AuctionEntry* ah = new AuctionEntry();
+        ah->Id = sObjectMgr->GenerateAuctionID();
+        ah->auctioneer = house.AuctioneerGuid;
+        ah->itemGUIDLow = item->GetGUIDLow();
+        ah->itemEntry = entry;
+        ah->itemCount = count;
+        ah->owner = g_cfg.BotCharGuid;
+        ah->startbid = startbid;
+        ah->bidder = 0;
+        ah->bid = 0;
+        ah->buyout = buyout;
+        ah->expire_time = time(nullptr) + g_cfg.SellDurationHrs * HOUR;
+        ah->deposit = 0;
+        ah->auctionHouseEntry = house.Entry;
+        ah->factionTemplateId = house.FactionTemplateId;
+
+        SQLTransaction trans = CharacterDatabase.BeginTransaction();
+        item->SaveToDB(trans);
+        ah->SaveToDB(trans);
+        CharacterDatabase.CommitTransaction(trans);
+
+        sAuctionMgr->AddAItem(item);
+        house.Object->AddAuction(ah);
         return true;
     }
 
     // ---- Seller -------------------------------------------------------------
     void RunSeller(AHBotHouse const& house)
     {
-        uint32 live = house.Object->Getcount();
-        if (live >= g_cfg.SellerTarget)
-            return;
-
-        uint32 toAdd = g_cfg.SellerTarget - live;
-        if (toAdd > g_cfg.SellerPerCycle)
-            toAdd = g_cfg.SellerPerCycle;
-
-        uint64 botGuidFull = MAKE_NEW_GUID(g_cfg.BotCharGuid, 0, HIGHGUID_PLAYER);
-        uint32 added = 0;
-
-        for (uint32 n = 0; n < toAdd; ++n)
+        // Tally existing bot-owned listings by category and legendary quality.
+        uint32 catCount[CAT_COUNT] = { 0 };
+        uint32 legCount = 0;
+        for (AuctionHouseObject::AuctionEntryMap::iterator itr = house.Object->GetAuctionsBegin();
+             itr != house.Object->GetAuctionsEnd(); ++itr)
         {
-            uint32 entry = g_pool[RandBetween(0, uint32(g_pool.size() - 1))];
-            ItemTemplate const* proto = sObjectMgr->GetItemTemplate(entry);
+            AuctionEntry* a = itr->second;
+            if (!a || a->owner != g_cfg.BotCharGuid)
+                continue;
+            ItemTemplate const* proto = sObjectMgr->GetItemTemplate(a->itemEntry);
             if (!proto)
                 continue;
+            uint8 cat = CategoryOf(*proto);
+            if (cat < CAT_COUNT)
+                ++catCount[cat];
+            if (proto->Quality >= ITEM_QUALITY_LEGENDARY)
+                ++legCount;
+        }
 
-            uint32 maxStack = proto->GetMaxStackSize();
-            uint32 cap = g_cfg.SellMaxStack;
-            if (maxStack < cap)
-                cap = maxStack;
-            if (cap < 1)
-                cap = 1;
-            uint32 count = RandBetween(1, cap);
+        uint32 budget = g_cfg.SellerPerCycle;
+        uint32 added = 0;
 
-            Item* item = Item::CreateItem(entry, count, nullptr);
-            if (!item)
+        // 1) Legendary guarantee first.
+        while (legCount < g_cfg.LegendaryMin && budget > 0 && !g_poolLegendary.empty())
+        {
+            uint32 entry = g_poolLegendary[RandBetween(0, uint32(g_poolLegendary.size() - 1))];
+            if (!CreateListing(house, entry, true))
+                break;
+            ++legCount; --budget; ++added;
+        }
+
+        // 2) Fill each category toward its target.
+        for (uint8 c = 0; c < CAT_COUNT && budget > 0; ++c)
+        {
+            if (g_poolByCat[c].empty())
                 continue;
-            item->SetOwnerGUID(botGuidFull);
-
-            uint64 buyout = uint64(double(proto->SellPrice) * double(count) * double(g_cfg.SellPriceMult));
-            if (buyout < 1)
+            while (catCount[c] < g_cfg.CatTarget[c] && budget > 0)
             {
-                delete item;
-                continue;
+                uint32 entry = g_poolByCat[c][RandBetween(0, uint32(g_poolByCat[c].size() - 1))];
+                if (!CreateListing(house, entry, false))
+                    break;
+                ++catCount[c]; --budget; ++added;
             }
-            uint64 startbid = uint64(double(buyout) * frand(0.5f, 0.9f));
-            if (startbid < 1)
-                startbid = 1;
-
-            AuctionEntry* ah = new AuctionEntry();
-            ah->Id = sObjectMgr->GenerateAuctionID();
-            ah->auctioneer = house.AuctioneerGuid;
-            ah->itemGUIDLow = item->GetGUIDLow();
-            ah->itemEntry = entry;
-            ah->itemCount = count;
-            ah->owner = g_cfg.BotCharGuid;
-            ah->startbid = startbid;
-            ah->bidder = 0;
-            ah->bid = 0;
-            ah->buyout = buyout;
-            ah->expire_time = time(nullptr) + g_cfg.SellDurationHrs * HOUR;
-            ah->deposit = 0;
-            ah->auctionHouseEntry = house.Entry;
-            ah->factionTemplateId = house.FactionTemplateId;
-
-            SQLTransaction trans = CharacterDatabase.BeginTransaction();
-            item->SaveToDB(trans);
-            ah->SaveToDB(trans);
-            CharacterDatabase.CommitTransaction(trans);
-
-            sAuctionMgr->AddAItem(item);
-            house.Object->AddAuction(ah);
-            ++added;
         }
 
         if (added)
-            SF_LOG_INFO("modules", "[mod-ah-bot] seller: listed %u item(s) in %s house (now %u live).",
-                added, house.Label, house.Object->Getcount());
+            SF_LOG_INFO("modules", "[mod-ah-bot] seller: listed %u item(s) in %s house (now %u live, %u legendary).",
+                added, house.Label, house.Object->Getcount(), legCount);
     }
 
     // ---- Buyer --------------------------------------------------------------
@@ -512,13 +657,27 @@ public:
 
     static bool HandleAHBotStatus(ChatHandler* handler, char const* /*args*/)
     {
-        handler->PSendSysMessage("AH-Bot: %s | seller:%s buyer:%s | houses:%u pool:%u botGuid:%u",
+        handler->PSendSysMessage("AH-Bot: %s | seller:%s buyer:%s | houses:%u botGuid:%u (%s)",
             g_cfg.Enable ? "ENABLED" : "disabled",
             g_cfg.SellerEnable ? "on" : "off",
             g_cfg.BuyerEnable ? "on" : "off",
-            uint32(g_houses.size()), uint32(g_pool.size()), g_cfg.BotCharGuid);
+            uint32(g_houses.size()), g_cfg.BotCharGuid, g_cfg.BotCharName.c_str());
         for (AHBotHouse const& h : g_houses)
-            handler->PSendSysMessage("  %s: %u live auction(s)", h.Label, h.Object->Getcount());
+        {
+            uint32 legCount = 0, botCount = 0;
+            for (AuctionHouseObject::AuctionEntryMap::iterator itr = h.Object->GetAuctionsBegin();
+                 itr != h.Object->GetAuctionsEnd(); ++itr)
+            {
+                AuctionEntry* a = itr->second;
+                if (!a || a->owner != g_cfg.BotCharGuid)
+                    continue;
+                ++botCount;
+                ItemTemplate const* proto = sObjectMgr->GetItemTemplate(a->itemEntry);
+                if (proto && proto->Quality >= ITEM_QUALITY_LEGENDARY)
+                    ++legCount;
+            }
+            handler->PSendSysMessage("  %s: %u live total, %u bot, %u legendary", h.Label, h.Object->Getcount(), botCount, legCount);
+        }
         return true;
     }
 
