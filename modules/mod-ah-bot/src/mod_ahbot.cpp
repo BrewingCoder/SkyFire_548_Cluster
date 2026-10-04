@@ -37,6 +37,7 @@
 #include <vector>
 #include <string>
 #include <cctype>
+#include <cstring>
 #include <ctime>
 
 namespace
@@ -228,13 +229,30 @@ namespace
         for (char& ch : n)
             ch = char(tolower((unsigned char)ch));
 
+        // Substring markers (brackets / obvious tags).
         static char const* tokens[] = {
             "(test", "test)", "[test", "[ph", "(ph)", "deprecated",
-            "unused", "[old", "(old)", "zzold", "debug", "[unused", "qa test"
+            "unused", "[old", "(old)", "zzold", "debug", "[unused"
         };
         for (char const* t : tokens)
             if (n.find(t) != std::string::npos)
                 return true;
+
+        // Whole-word markers (word-boundary so "greatest"/"latest" are NOT blocked).
+        static char const* words[] = { "test", "tests", "qa", "beta", "placeholder", "broken", "notused" };
+        for (char const* w : words)
+        {
+            size_t wl = strlen(w);
+            size_t pos = 0;
+            while ((pos = n.find(w, pos)) != std::string::npos)
+            {
+                bool leftOk  = (pos == 0) || !isalnum((unsigned char)n[pos - 1]);
+                bool rightOk = (pos + wl >= n.size()) || !isalnum((unsigned char)n[pos + wl]);
+                if (leftOk && rightOk)
+                    return true;
+                pos += wl;
+            }
+        }
         return false;
     }
 
@@ -279,6 +297,17 @@ namespace
             return false;
         if (IsBlockedName(proto.Name1))
             return false;
+
+        // BoE-only: no bind-on-pickup legendaries (players must be able to buy/trade them).
+        switch (proto.Bonding)
+        {
+            case NO_BIND:
+            case BIND_WHEN_EQUIPED:
+            case BIND_WHEN_USE:
+                break;
+            default:
+                return false;   // BoP / quest-bound
+        }
         return ClassWhitelisted(proto);
     }
 
