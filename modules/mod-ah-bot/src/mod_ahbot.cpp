@@ -36,6 +36,7 @@
 #include "Util.h"
 #include <vector>
 #include <string>
+#include <cctype>
 #include <ctime>
 
 namespace
@@ -220,10 +221,29 @@ namespace
         return CategoryOf(proto) != CAT_COUNT;
     }
 
+    // Drop obvious test / placeholder / deprecated items by name token.
+    bool IsBlockedName(std::string const& name)
+    {
+        std::string n = name;
+        for (char& ch : n)
+            ch = char(tolower((unsigned char)ch));
+
+        static char const* tokens[] = {
+            "(test", "test)", "[test", "[ph", "(ph)", "deprecated",
+            "unused", "[old", "(old)", "zzold", "debug", "[unused", "qa test"
+        };
+        for (char const* t : tokens)
+            if (n.find(t) != std::string::npos)
+                return true;
+        return false;
+    }
+
     // Eligible for a normal (per-category) listing.
     bool ItemEligibleForSeller(ItemTemplate const& proto)
     {
         if (proto.Name1.empty() || proto.SellPrice == 0)
+            return false;
+        if (IsBlockedName(proto.Name1))
             return false;
         if (proto.Quality < g_cfg.SellMinQuality || proto.Quality > g_cfg.SellMaxQuality)
             return false;
@@ -251,9 +271,13 @@ namespace
     {
         if (proto.Name1.empty())
             return false;
-        if (proto.Quality < ITEM_QUALITY_LEGENDARY)   // 5+ (legendary, artifact)
+        if (proto.Quality != ITEM_QUALITY_LEGENDARY)   // exactly 5 (not artifact/heirloom)
+            return false;
+        if (proto.ItemLevel == 0)                      // drop placeholders
             return false;
         if (proto.Flags & ITEM_PROTO_FLAG_CONJURED)
+            return false;
+        if (IsBlockedName(proto.Name1))
             return false;
         return ClassWhitelisted(proto);
     }
@@ -499,7 +523,7 @@ namespace
             uint8 cat = CategoryOf(*proto);
             if (cat < CAT_COUNT)
                 ++catCount[cat];
-            if (proto->Quality >= ITEM_QUALITY_LEGENDARY)
+            if (proto->Quality == ITEM_QUALITY_LEGENDARY)
                 ++legCount;
         }
 
@@ -673,7 +697,7 @@ public:
                     continue;
                 ++botCount;
                 ItemTemplate const* proto = sObjectMgr->GetItemTemplate(a->itemEntry);
-                if (proto && proto->Quality >= ITEM_QUALITY_LEGENDARY)
+                if (proto && proto->Quality == ITEM_QUALITY_LEGENDARY)
                     ++legCount;
             }
             handler->PSendSysMessage("  %s: %u live total, %u bot, %u legendary", h.Label, h.Object->Getcount(), botCount, legCount);
