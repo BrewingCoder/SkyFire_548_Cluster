@@ -90,12 +90,64 @@ AuctionHouseBot.Seller.Count.Projectiles = 5
 AuctionHouseBot.Seller.Count.Misc = 8
 
 #
-#    Legendary guarantee - keep at least this many Legendary (quality 5+)
-#    listings live in EACH house. Most legendaries are bind-on-pickup with no
-#    vendor price, so they use a flat price floor (copper) instead of SellPrice.
+#    Legendary guarantee - keep at least this many Legendary (quality 5, BoE/
+#    No-Bind only) listings live in EACH house. Their price floor is the
+#    per-quality Legendary floor below.
 
 AuctionHouseBot.Seller.Legendary.Min = 2
-AuctionHouseBot.Seller.Legendary.Price = 5000000
+
+########################################
+# Seller pricing
+#
+#   buyout = SellPrice x stack x PriceMultiplier
+#          x QualityMult[quality] x CategoryMult[category]
+#   ...raised to the per-quality Floor, then x a random Variance factor.
+########################################
+#
+#    Per-quality price multipliers (applied on top of PriceMultiplier).
+#    Tune how steeply price climbs with rarity. Default 1.0 (no change).
+
+AuctionHouseBot.Seller.Price.QualityMult.Poor = 1.0
+AuctionHouseBot.Seller.Price.QualityMult.Common = 1.0
+AuctionHouseBot.Seller.Price.QualityMult.Uncommon = 1.0
+AuctionHouseBot.Seller.Price.QualityMult.Rare = 1.0
+AuctionHouseBot.Seller.Price.QualityMult.Epic = 1.0
+AuctionHouseBot.Seller.Price.QualityMult.Legendary = 1.0
+
+#
+#    Per-category price multipliers. e.g. make Materials cheaper or Weapons
+#    dearer. Default 1.0.
+
+AuctionHouseBot.Seller.Price.CategoryMult.Materials = 1.0
+AuctionHouseBot.Seller.Price.CategoryMult.Weapons = 1.0
+AuctionHouseBot.Seller.Price.CategoryMult.Armor = 1.0
+AuctionHouseBot.Seller.Price.CategoryMult.Consumables = 1.0
+AuctionHouseBot.Seller.Price.CategoryMult.Recipes = 1.0
+AuctionHouseBot.Seller.Price.CategoryMult.Gems = 1.0
+AuctionHouseBot.Seller.Price.CategoryMult.Glyphs = 1.0
+AuctionHouseBot.Seller.Price.CategoryMult.Containers = 1.0
+AuctionHouseBot.Seller.Price.CategoryMult.Projectiles = 1.0
+AuctionHouseBot.Seller.Price.CategoryMult.Misc = 1.0
+
+#
+#    Per-quality price FLOOR (copper). No listing of that quality lists below
+#    this (before variance). Stops greens/blues/epics - and 0-sell-price items -
+#    from listing for pennies. Legendaries use the Legendary floor.
+#    Defaults: Poor 0, Common 10s, Uncommon 50s, Rare 5g, Epic 50g, Legendary 500g.
+
+AuctionHouseBot.Seller.Price.Floor.Poor = 0
+AuctionHouseBot.Seller.Price.Floor.Common = 1000
+AuctionHouseBot.Seller.Price.Floor.Uncommon = 5000
+AuctionHouseBot.Seller.Price.Floor.Rare = 50000
+AuctionHouseBot.Seller.Price.Floor.Epic = 500000
+AuctionHouseBot.Seller.Price.Floor.Legendary = 5000000
+
+#
+#    Price variance - each listing's final price is multiplied by a random
+#    factor in [1-Variance, 1+Variance], so identical items aren't identically
+#    priced. 0 = off. Default 0.15 (+/-15%).
+
+AuctionHouseBot.Seller.Price.Variance = 0.15
 
 ########################################
 # Buyer

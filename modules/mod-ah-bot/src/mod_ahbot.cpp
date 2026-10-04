@@ -58,6 +58,20 @@ namespace
         CAT_COUNT
     };
 
+    char const* QualityName(uint8 q)
+    {
+        switch (q)
+        {
+            case 0:  return "Poor";
+            case 1:  return "Common";
+            case 2:  return "Uncommon";
+            case 3:  return "Rare";
+            case 4:  return "Epic";
+            case 5:  return "Legendary";
+            default: return "Legendary";
+        }
+    }
+
     char const* CategoryName(uint8 c)
     {
         switch (c)
@@ -122,9 +136,16 @@ namespace
         // seller - per-category stock targets (kept live per house)
         uint32 CatTarget[CAT_COUNT] = { 80, 50, 50, 25, 15, 15, 10, 8, 5, 8 };
 
-        // seller - legendary guarantee
+        // seller - pricing. buyout = SellPrice * stack * PriceMultiplier
+        //          * QualityMult[quality] * CategoryMult[category], raised to the
+        //          per-quality Floor, then multiplied by a random variance factor.
+        float  QualityMult[6]       = { 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f };  // Poor..Legendary
+        float  CategoryMult[CAT_COUNT] = { 1,1,1,1,1,1,1,1,1,1 };
+        uint64 FloorQ[6]            = { 0, 1000, 5000, 50000, 500000, 5000000 }; // Poor..Legendary (copper)
+        float  PriceVariance        = 0.15f;        // +/- fraction applied to each listing
+
+        // seller - legendary guarantee (price floor is FloorQ[Legendary])
         uint32 LegendaryMin    = 2;                 // keep >= this many q5 listings per house
-        uint64 LegendaryPrice  = 5000000;           // floor buyout for legendaries (copper)
 
         // buyer
         float  BuyPriceMult    = 1.0f;              // buy if buyout <= value * this
@@ -203,7 +224,24 @@ namespace
             g_cfg.CatTarget[c] = uint32(sConfigMgr->GetIntDefault(CatCfgKey(c), int(defaults[c])));
 
         g_cfg.LegendaryMin   = uint32(sConfigMgr->GetIntDefault("AuctionHouseBot.Seller.Legendary.Min", 2));
-        g_cfg.LegendaryPrice = uint64(sConfigMgr->GetIntDefault("AuctionHouseBot.Seller.Legendary.Price", 5000000));
+
+        // Pricing knobs (per-quality multiplier + floor, per-category multiplier, variance).
+        uint64 floorDefaults[6] = { 0, 1000, 5000, 50000, 500000, 5000000 };
+        for (uint8 q = 0; q < 6; ++q)
+        {
+            std::string mk = std::string("AuctionHouseBot.Seller.Price.QualityMult.") + QualityName(q);
+            std::string fk = std::string("AuctionHouseBot.Seller.Price.Floor.") + QualityName(q);
+            g_cfg.QualityMult[q] = sConfigMgr->GetFloatDefault(mk.c_str(), 1.0f);
+            g_cfg.FloorQ[q]      = uint64(sConfigMgr->GetIntDefault(fk.c_str(), int(floorDefaults[q])));
+        }
+        for (uint8 c = 0; c < CAT_COUNT; ++c)
+        {
+            std::string ck = std::string("AuctionHouseBot.Seller.Price.CategoryMult.") + CategoryName(c);
+            g_cfg.CategoryMult[c] = sConfigMgr->GetFloatDefault(ck.c_str(), 1.0f);
+        }
+        g_cfg.PriceVariance  = sConfigMgr->GetFloatDefault("AuctionHouseBot.Seller.Price.Variance", 0.15f);
+        if (g_cfg.PriceVariance < 0.0f)  g_cfg.PriceVariance = 0.0f;
+        if (g_cfg.PriceVariance > 0.9f)  g_cfg.PriceVariance = 0.9f;
 
         g_cfg.BuyPriceMult   = sConfigMgr->GetFloatDefault("AuctionHouseBot.Buyer.PriceMultiplier", 1.0f);
         g_cfg.BuyPerCycle    = uint32(sConfigMgr->GetIntDefault("AuctionHouseBot.Buyer.PerCycle", 10));
@@ -476,7 +514,7 @@ namespace
     }
 
     // Create and persist one listing of the given item entry in the house.
-    bool CreateListing(AHBotHouse const& house, uint32 entry, bool legendary)
+    bool CreateListing(AHBotHouse const& house, uint32 entry, bool /*legendary*/)
     {
         ItemTemplate const* proto = sObjectMgr->GetItemTemplate(entry);
         if (!proto)
@@ -495,12 +533,22 @@ namespace
             return false;
         item->SetOwnerGUID(MAKE_NEW_GUID(g_cfg.BotCharGuid, 0, HIGHGUID_PLAYER));
 
-        uint64 buyout = uint64(double(proto->SellPrice) * double(count) * double(g_cfg.SellPriceMult));
-        if (legendary && buyout < g_cfg.LegendaryPrice)
-            buyout = g_cfg.LegendaryPrice;
+        // Pricing: SellPrice * stack * global * quality-mult * category-mult,
+        // floored per quality, then a random variance factor.
+        uint8 q = proto->Quality <= 5 ? uint8(proto->Quality) : uint8(5);
+        uint8 cat = CategoryOf(*proto);
+        double catMult = (cat < CAT_COUNT) ? double(g_cfg.CategoryMult[cat]) : 1.0;
+        double base = double(proto->SellPrice) * double(count)
+                    * double(g_cfg.SellPriceMult) * double(g_cfg.QualityMult[q]) * catMult;
+        if (base < double(g_cfg.FloorQ[q]))
+            base = double(g_cfg.FloorQ[q]);
+
+        double factor = (g_cfg.PriceVariance > 0.0f)
+            ? double(frand(1.0f - g_cfg.PriceVariance, 1.0f + g_cfg.PriceVariance)) : 1.0;
+        uint64 buyout = uint64(base * factor);
         if (buyout < 1)
         {
-            // non-legendary with no vendor price: skip
+            // only when SellPrice==0 AND floor==0 (e.g. Poor quality): skip
             delete item;
             return false;
         }
