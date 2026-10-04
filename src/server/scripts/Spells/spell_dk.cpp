@@ -13,6 +13,7 @@
 #include "ScriptMgr.h"
 #include "SpellScript.h"
 #include "SpellAuraEffects.h"
+#include "DatabaseEnv.h"   // [lab] Death Gate 5.4.0 two-way persistence
 #include "DynamicObject.h"
 #include "GridNotifiers.h"
 #include "GridNotifiersImpl.h"
@@ -574,11 +575,74 @@ public:
             return SpellCastResult::SPELL_CAST_OK;
         }
 
+        // [lab] Is the player inside Ebon Hold (Acherus)? Covers the DK intro
+        // instance (map 609), the Ebon Hold area (4281 when assigned), and the
+        // floating Ebon Hold over Eastern Plaguelands (map 0 coordinate box).
+        static bool InEbonHold(Player* p)
+        {
+            if (p->GetMapId() == 609 || p->GetAreaId() == 4281)
+                return true;
+            if (p->GetMapId() == 0)
+            {
+                float x = p->GetPositionX(), y = p->GetPositionY(), z = p->GetPositionZ();
+                if (x > 2300.0f && x < 2600.0f && y > -5700.0f && y < -5400.0f && z > 380.0f)
+                    return true;
+            }
+            return false;
+        }
+
+        // [lab] Patch 5.4.0 two-way Death Gate: outside Ebon Hold -> remember
+        // departure point and go to Ebon Hold; inside Ebon Hold -> return to the
+        // stored departure point. Persisted in characters.character_death_gate_return
+        // so it survives logout/restart/days away.
         void HandleScript(SpellEffIndex effIndex)
         {
             PreventHitDefaultEffect(effIndex);
-            if (Unit* target = GetHitUnit())
+            Unit* target = GetHitUnit();
+            if (!target)
+                return;
+
+            Player* player = target->ToPlayer();
+            if (!player)
+            {
                 target->CastSpell(target, GetEffectValue(), false);
+                return;
+            }
+
+            static bool s_tableReady = false;
+            if (!s_tableReady)
+            {
+                CharacterDatabase.DirectExecute(
+                    "CREATE TABLE IF NOT EXISTS `character_death_gate_return` ("
+                    "`guid` INT UNSIGNED NOT NULL PRIMARY KEY, `map` SMALLINT UNSIGNED NOT NULL, "
+                    "`posX` FLOAT NOT NULL, `posY` FLOAT NOT NULL, `posZ` FLOAT NOT NULL, `o` FLOAT NOT NULL)");
+                s_tableReady = true;
+            }
+
+            uint32 guid = player->GetGUIDLow();
+
+            if (InEbonHold(player))
+            {
+                // Return to the stored departure point, if we have one.
+                if (QueryResult result = CharacterDatabase.PQuery(
+                        "SELECT `map`, `posX`, `posY`, `posZ`, `o` FROM `character_death_gate_return` WHERE `guid`=%u", guid))
+                {
+                    Field* f = result->Fetch();
+                    player->TeleportTo(f[0].GetUInt16(), f[1].GetFloat(), f[2].GetFloat(), f[3].GetFloat(), f[4].GetFloat());
+                    CharacterDatabase.PExecute("DELETE FROM `character_death_gate_return` WHERE `guid`=%u", guid);
+                    return;
+                }
+                // No stored point (e.g. first visit): fall back to default behavior.
+                player->CastSpell(player, GetEffectValue(), false);
+            }
+            else
+            {
+                // Departing: remember where we left from, then go to Ebon Hold.
+                CharacterDatabase.PExecute(
+                    "REPLACE INTO `character_death_gate_return` (`guid`,`map`,`posX`,`posY`,`posZ`,`o`) VALUES (%u,%u,%f,%f,%f,%f)",
+                    guid, player->GetMapId(), player->GetPositionX(), player->GetPositionY(), player->GetPositionZ(), player->GetOrientation());
+                player->CastSpell(player, GetEffectValue(), false);
+            }
         }
 
         void Register() OVERRIDE
