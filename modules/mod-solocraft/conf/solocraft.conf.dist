@@ -1,0 +1,31 @@
+[worldserver]
+
+########################################
+# mod-solocraft configuration
+#
+# Scales a player's stats up when they enter an instance under-manned, so a
+# solo player / small group can clear content built for a full group.
+#   buff multiplier = 1 + (maxPlayers/actualPlayers - 1) * Balance   (capped)
+# Applied on entering a dungeon/raid, removed on leaving.
+########################################
+#
+#    Solocraft.Enable        Master switch. Default 0 (off).
+#    Solocraft.Dungeons      Scale 5-man dungeons. Default 1.
+#    Solocraft.Raids         Scale raids. Default 1.
+#    Solocraft.Balance       Fraction of full linear scaling to apply (0..1+).
+#                            1.0 = full (25-man solo -> ~25x); lower = gentler.
+#                            Default 0.6.
+#    Solocraft.MaxMultiplier Hard cap on the stat multiplier. Default 10.0.
+#    Solocraft.MinLevel      Don't scale below this level. Default 1.
+#    Solocraft.ScaleHealth   Also scale max health (and heal to full on apply).
+#                            Default 1.
+#    Solocraft.Announce      Whisper the player their scaling on entry. Default 1.
+
+Solocraft.Enable = 0
+Solocraft.Dungeons = 1
+Solocraft.Raids = 1
+Solocraft.Balance = 0.6
+Solocraft.MaxMultiplier = 10.0
+Solocraft.MinLevel = 1
+Solocraft.ScaleHealth = 1
+Solocraft.Announce = 1
