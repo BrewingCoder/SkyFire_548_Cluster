@@ -41,6 +41,7 @@
 #include "WaypointMovementGenerator.h"
 #include "World.h"
 #include "WorldPacket.h"
+#include "Config.h" // [lab] mod-solocraft InstanceCorpsePersist (sConfigMgr)
 
 #include "Transport.h"
 
@@ -1453,6 +1454,14 @@ void Creature::setDeathState(DeathState s)
     if (s == DeathState::JUST_DIED)
     {
         m_corpseRemoveTime = time(NULL) + m_corpseDelay;
+        // [lab] mod-solocraft InstanceCorpsePersist: keep mob corpses (and their loot)
+        // in instances until the instance resets, so a solo player can run back after a
+        // death or clear a big room before looting. This core gate covers ALL kills,
+        // including pet/guardian killing blows that the module's OnCreatureKill hook
+        // cannot see. Same config key as the module, so one knob controls both.
+        if (GetMap() && GetMap()->Instanceable() &&
+            sConfigMgr->GetBoolDefault("Solocraft.InstanceCorpsePersist", true))
+            m_corpseRemoveTime = time(NULL) + WEEK;
         m_respawnTime = time(NULL) + m_respawnDelay + m_corpseDelay;
 
         // always save boss respawn time at death to prevent crash cheating
