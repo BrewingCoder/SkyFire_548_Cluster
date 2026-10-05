@@ -8,6 +8,7 @@
 #include "CreatureAISelector.h"
 #include "DynamicTree.h"
 #include "GameObjectAI.h"
+#include "WatchMgr.h" // [lab] character event watcher
 #include "GameObjectModel.h"
 #include "GameObjectTransportTiming.h"
 #include "GridNotifiersImpl.h"
@@ -1444,6 +1445,9 @@ void GameObject::Use(Unit* user)
     if (HasFlag(GAMEOBJECT_FIELD_FLAGS, GO_FLAG_NOT_SELECTABLE))
         return;
 
+    if (sWatchMgr->Active()) // [lab] watcher
+        sWatchMgr->Event(this, WATCH_CAT_GO, "GO_USE");
+
     // by default spell caster is user
     Unit* spellCaster = user;
     uint32 spellId = 0;
@@ -2414,6 +2418,12 @@ void GameObject::SetGoState(GOState state)
     SetByteValue(GAMEOBJECT_FIELD_PERCENT_HEALTH, 0, GetGOStateValue(state));
     HandleLegacyTransportStateChange(oldState, state);
     sScriptMgr->OnGameObjectStateChanged(this, uint32(state));
+    if (sWatchMgr->Active() && oldState != state) // [lab] watcher
+    {
+        char ex[48];
+        snprintf(ex, sizeof(ex), ",\"from\":%u,\"to\":%u", uint32(oldState), uint32(state));
+        sWatchMgr->Event(this, WATCH_CAT_GO, "GO_STATE", ex);
+    }
     if (m_model && !IsTransport())
     {
         if (!IsInWorld())

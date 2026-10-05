@@ -42,6 +42,7 @@
 #include "World.h"
 #include "WorldPacket.h"
 #include "Config.h" // [lab] mod-solocraft InstanceCorpsePersist (sConfigMgr)
+#include "WatchMgr.h" // [lab] character event watcher
 
 #include "Transport.h"
 
@@ -189,6 +190,9 @@ void Creature::AddToWorld()
         AIM_Initialize();
         if (IsVehicle())
             GetVehicleKit()->Install();
+
+        if (sWatchMgr->Active()) // [lab] watcher
+            sWatchMgr->Event(this, WATCH_CAT_SPAWN, "SPAWN");
     }
 }
 
@@ -1453,6 +1457,9 @@ void Creature::setDeathState(DeathState s)
 
     if (s == DeathState::JUST_DIED)
     {
+        if (sWatchMgr->Active()) // [lab] watcher
+            sWatchMgr->Event(this, WATCH_CAT_DEATH, "DEATH");
+
         m_corpseRemoveTime = time(NULL) + m_corpseDelay;
         // [lab] mod-solocraft InstanceCorpsePersist: keep mob corpses (and their loot)
         // in instances until the instance resets, so a solo player can run back after a

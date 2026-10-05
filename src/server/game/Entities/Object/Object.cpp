@@ -32,6 +32,7 @@
 #include "Transport.h"
 #include "Unit.h"
 #include "UpdateData.h"
+#include "WatchMgr.h" // [lab] character event watcher
 #include "UpdateFieldFlags.h"
 #include "UpdateMask.h"
 #include "Util.h"
@@ -1282,6 +1283,10 @@ void Object::SetFlag(uint16 index, uint32 newFlag)
             sObjectAccessor->AddUpdateObject(this);
             m_objectUpdated = true;
         }
+
+        if (sWatchMgr->Active() && index == UNIT_FIELD_FLAGS) // [lab] watcher
+            if (Unit* u = ToUnit())
+                sWatchMgr->Event(u, WATCH_CAT_FLAGS, "FLAGS", ",\"set\":" + WatchMgr::DecodeUnitFlags(newFlag));
     }
 }
 
@@ -1303,6 +1308,10 @@ void Object::RemoveFlag(uint16 index, uint32 oldFlag)
             sObjectAccessor->AddUpdateObject(this);
             m_objectUpdated = true;
         }
+
+        if (sWatchMgr->Active() && index == UNIT_FIELD_FLAGS) // [lab] watcher
+            if (Unit* u = ToUnit())
+                sWatchMgr->Event(u, WATCH_CAT_FLAGS, "FLAGS", ",\"rm\":" + WatchMgr::DecodeUnitFlags(oldFlag));
     }
 }
 
