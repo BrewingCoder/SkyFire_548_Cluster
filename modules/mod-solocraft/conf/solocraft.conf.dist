@@ -20,6 +20,22 @@
 #    Solocraft.ScaleHealth   Also scale max health (and heal to full on apply).
 #                            Default 1.
 #    Solocraft.Announce      Whisper the player their scaling on entry. Default 1.
+#    Solocraft.HealthMultiplier
+#                            EXTRA multiplier applied to max health ON TOP of the
+#                            core multiplier. Primary stats stay at the core
+#                            multiplier; only health is boosted further, e.g.
+#                            core x5 with 1.5 here => health x7.5. Gives a solo
+#                            player a longer survival window without inflating
+#                            damage output (work the mechanics, live longer).
+#                            1.0 = no extra health. Requires ScaleHealth=1.
+#                            Default 1.0.
+#    Solocraft.InstanceCorpsePersist
+#                            Keep killed mob corpses (and their loot) in an
+#                            instance until the instance resets, instead of the
+#                            normal ~60s decay - so you can run back after a
+#                            death and still loot, or clear a big room before
+#                            looting it. Looted corpses still decay normally.
+#                            Applies to direct player kills. Default 1.
 
 Solocraft.Enable = 0
 Solocraft.Dungeons = 1
@@ -29,3 +45,5 @@ Solocraft.MaxMultiplier = 10.0
 Solocraft.MinLevel = 1
 Solocraft.ScaleHealth = 1
 Solocraft.Announce = 1
+Solocraft.HealthMultiplier = 1.0
+Solocraft.InstanceCorpsePersist = 1

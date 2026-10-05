@@ -22,6 +22,25 @@ out, or regrouping. Because `GetMaxPlayers()` comes from the map's difficulty
 entry, **all MoP difficulties** (5-man, 10/25, LFR, Flex, Challenge) are handled
 automatically with no hardcoded table.
 
+### Extra health (survivability knob)
+
+`Solocraft.HealthMultiplier` applies an **additional** multiplier to max health
+*on top of* the core multiplier, leaving primary stats (and therefore damage) at
+the core multiplier. Example: at a core ×5 with `HealthMultiplier = 1.5`, stats
+are ×5 but health is ×7.5. This follows the modern-WoW principle for solo/scaled
+content — you still have to work your rotation and the mechanics, you're just
+given a longer window to do it. `1.0` = no extra health.
+
+### Instance corpse persistence
+
+`Solocraft.InstanceCorpsePersist` keeps killed mob corpses (and their loot) in an
+instance until the instance resets, instead of the normal ~60s decay. Soloing a
+dungeon means you often **clear a room before looting**, or **die and run back** —
+both of which lose loot to corpse decay on a normal server. With this on, unlooted
+corpses wait for you; looted corpses still decay normally. It hooks `OnCreatureKill`,
+so it applies to **direct player kills** (a pet/guardian killing blow uses a
+different code path and is not covered).
+
 Config: see `conf/solocraft.conf.dist`. In-game: `.solocraft status|on|off`.
 
 > Note: on this server the knobs are set via the worldserver config/overrides
