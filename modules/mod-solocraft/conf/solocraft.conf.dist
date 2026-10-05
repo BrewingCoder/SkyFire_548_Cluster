@@ -29,6 +29,11 @@
 #                            damage output (work the mechanics, live longer).
 #                            1.0 = no extra health. Requires ScaleHealth=1.
 #                            Default 1.0.
+#    Solocraft.ArmorMultiplier
+#                            Flat armor multiplier applied while scaled (physical
+#                            damage mitigation). Smooth, no RNG, no buff icon;
+#                            applied/removed with the rest of the scaling. Does
+#                            nothing vs magic. 1.0 = off. Default 1.0.
 #    Solocraft.InstanceCorpsePersist
 #                            Keep killed mob corpses (and their loot) in an
 #                            instance until the instance resets, instead of the
@@ -52,5 +57,6 @@ Solocraft.MinLevel = 1
 Solocraft.ScaleHealth = 1
 Solocraft.Announce = 1
 Solocraft.HealthMultiplier = 1.0
+Solocraft.ArmorMultiplier = 1.0
 Solocraft.InstanceCorpsePersist = 1
 Solocraft.PreventDurabilityLoss = 0
