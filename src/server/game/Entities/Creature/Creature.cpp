@@ -2279,6 +2279,16 @@ void Creature::GetRespawnPosition(float& x, float& y, float& z, float* ori, floa
 
 void Creature::AllLootRemovedFromCorpse()
 {
+    // [lab] mod-solocraft InstanceCorpsePersist: in instances we intentionally hold the
+    // corpse until the instance resets (m_corpseRemoveTime = now + WEEK, set in
+    // setDeathState). The looted-decay logic below subtracts that huge delta from BOTH
+    // m_corpseRemoveTime AND m_respawnTime, which would remove the corpse and respawn the
+    // mob the instant it is looted. Skip it in instances so looted corpses persist and
+    // instance mobs do not respawn until the instance resets.
+    if (GetMap() && GetMap()->Instanceable() &&
+        sConfigMgr->GetBoolDefault("Solocraft.InstanceCorpsePersist", true))
+        return;
+
     if (!HasFlag(UNIT_FIELD_FLAGS, UNIT_FLAG_SKINNABLE))
     {
         time_t now = time(NULL);
