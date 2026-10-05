@@ -14,6 +14,9 @@
 #include "SpellScript.h"
 #include "SpellAuraEffects.h"
 #include "DatabaseEnv.h"   // [lab] Death Gate 5.4.0 two-way persistence
+#include "DBCStores.h"       // [lab] Raise Dead direct summon (sSummonPropertiesStore)
+#include "TemporarySummon.h" // [lab] Raise Dead direct summon (TempSummon / Guardian)
+#include "Map.h"             // [lab] Raise Dead direct summon (Map::SummonCreature)
 #include "DynamicObject.h"
 #include "GridNotifiers.h"
 #include "GridNotifiersImpl.h"
@@ -231,13 +234,36 @@ public:
 
         void HandleDummy(SpellEffIndex /*effIndex*/)
         {
-            if (Player* _player = GetCaster()->ToPlayer())
+            Player* _player = GetCaster() ? GetCaster()->ToPlayer() : NULL;
+            if (!_player)
+                return;
+
+            // [lab] MoP Raise Dead: the 5.4.8 DBC summon indirection is broken. The pet
+            // path (52150) points at SummonProperties id 1, which does NOT exist in
+            // SummonProperties.dbc (lowest id is 41) -> silent no-op. The guardian path
+            // (46585) relies on a spell destination that is not set on this triggered
+            // self-cast, so Spell::SummonGuardian reads *destTarget at the world origin
+            // and the ghoul never appears at the caster. Summon the Risen Ghoul directly
+            // here using the valid guardian SummonProperties (829), mirroring
+            // Spell::SummonGuardian but with an explicit caster position.
+            uint32 const RISEN_GHOUL_ENTRY       = 26125;
+            uint32 const GHOUL_SUMMON_PROPERTIES = 829;                 // Control=1, Type=2, Slot=1 (present in DBC)
+            int32  const GHOUL_GUARDIAN_DURATION = 60 * IN_MILLISECONDS;
+
+            bool asPet = _player->HasAura(SPELL_DK_MASTER_OF_GHOULS);
+            uint32 duration = asPet ? 0 : uint32(GHOUL_GUARDIAN_DURATION); // Master of Ghouls -> permanent until dismissed/killed
+
+            if (SummonPropertiesEntry const* props = sSummonPropertiesStore.LookupEntry(GHOUL_SUMMON_PROPERTIES))
             {
-                if (_player->HasAura(SPELL_DK_MASTER_OF_GHOULS))
-                    _player->CastSpell(_player, SPELL_DK_GHOUL_AS_PET, true);
-                else
-                    _player->CastSpell(_player, SPELL_DK_GHOUL_AS_GUARDIAN, true);
+                if (TempSummon* ghoul = _player->GetMap()->SummonCreature(RISEN_GHOUL_ENTRY, *_player, props, duration, _player, GetSpellInfo()->Id))
+                {
+                    if (ghoul->HasUnitTypeMask(UNIT_MASK_GUARDIAN))
+                        ((Guardian*)ghoul)->InitStatsForLevel(_player->getLevel());
+                    ghoul->setFaction(_player->getFaction());
+                }
             }
+            else // last resort so a ghoul always appears even if the DBC row is absent
+                _player->SummonCreature(RISEN_GHOUL_ENTRY, *_player, TempSummonType::TEMPSUMMON_TIMED_DESPAWN, uint32(GHOUL_GUARDIAN_DURATION));
         }
 
         void Register() OVERRIDE
