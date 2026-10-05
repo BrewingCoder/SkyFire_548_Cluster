@@ -56,6 +56,17 @@
 #                            clearing hard content means dying a lot, so you're
 #                            not constantly repairing. Enforced by a core gate in
 #                            Player::DurabilityPointsLoss. Default 0.
+#    Solocraft.UseAura       Apply the scaling aura (carrier spell 32172, effects
+#                            overridden in DB) while scaled. It carries an all-school
+#                            damage-TAKEN reduction (mitigation that also covers
+#                            physical, which armor alone can't) and a spell/disease
+#                            damage-DONE boost scaled with the group multiplier (for
+#                            casters / Unholy DKs / diseases; physical melee is scaled
+#                            by the weapon-damage multiplier instead). Default 1.
+#    Solocraft.DamageTakenReduction
+#                            % of ALL incoming damage removed by the aura while scaled
+#                            (0..95). The main survivability lever for soloing content
+#                            tuned for a full group. Requires UseAura=1. Default 0.
 
 Solocraft.Enable = 0
 Solocraft.Dungeons = 1
@@ -70,3 +81,5 @@ Solocraft.ArmorMultiplier = 1.0
 Solocraft.DamageMultiplier = 1.0
 Solocraft.InstanceCorpsePersist = 1
 Solocraft.PreventDurabilityLoss = 0
+Solocraft.UseAura = 1
+Solocraft.DamageTakenReduction = 0

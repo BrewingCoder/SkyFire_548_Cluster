@@ -21,6 +21,8 @@
 #include "Creature.h"
 #include "Common.h"
 #include "SharedDefines.h"
+#include "SpellAuras.h"        // scaling aura (AddAura/SetDuration/GetEffect)
+#include "SpellAuraEffects.h"  // AuraEffect::ChangeAmount
 #include <unordered_map>
 
 namespace
@@ -40,7 +42,11 @@ namespace
         bool  Announce = true;
         bool  InstanceCorpsePersist = true;  // keep mob corpses in instances until reset (loot after a death / clear-then-loot)
         bool  PreventDurabilityLoss = false; // disable all durability loss server-wide (solo/family QoL; enforced by a core gate)
+        bool  UseAura = true;                // apply the scaling aura (all-school damage-taken mitigation + spell/disease damage done)
+        float DamageTakenReduction = 0.0f;   // % all-school incoming damage reduction via the aura while scaled; 0 = off
     };
+
+    uint32 const SCALING_AURA = 32172;       // carrier: "[PH] Buffbot Buff Effect", effects overridden in sql/lab/02_solocraft_scaling_aura.sql
 
     SolocraftConfig g_cfg;
 
@@ -63,6 +69,10 @@ namespace
         g_cfg.Announce    = sConfigMgr->GetBoolDefault("Solocraft.Announce", true);
         g_cfg.InstanceCorpsePersist = sConfigMgr->GetBoolDefault("Solocraft.InstanceCorpsePersist", true);
         g_cfg.PreventDurabilityLoss = sConfigMgr->GetBoolDefault("Solocraft.PreventDurabilityLoss", false);
+        g_cfg.UseAura             = sConfigMgr->GetBoolDefault("Solocraft.UseAura", true);
+        g_cfg.DamageTakenReduction = sConfigMgr->GetFloatDefault("Solocraft.DamageTakenReduction", 0.0f);
+        if (g_cfg.DamageTakenReduction < 0.0f)  g_cfg.DamageTakenReduction = 0.0f;
+        if (g_cfg.DamageTakenReduction > 95.0f) g_cfg.DamageTakenReduction = 95.0f;  // never full immunity
 
         if (g_cfg.Balance < 0.0f) g_cfg.Balance = 0.0f;
         if (g_cfg.MaxMult < 1.0f) g_cfg.MaxMult = 1.0f;
@@ -95,6 +105,7 @@ namespace
     {
         if (!player)
             return;
+        player->RemoveAura(SCALING_AURA);   // always clear the scaling aura (idempotent; handles UseAura toggled off)
         std::unordered_map<uint32, AppliedMods>::iterator it = g_applied.find(player->GetGUIDLow());
         if (it == g_applied.end())
             return;
@@ -145,6 +156,23 @@ namespace
         float damagePct = (damageMult - 1.0f) * 100.0f;        // TOTAL_PCT on weapon damage
         ApplyMods(player, statPct, healthPct, armorPct, damagePct, true);
         g_applied[player->GetGUIDLow()] = { statPct, healthPct, armorPct, damagePct };
+
+        // Scaling aura: all-school damage-TAKEN reduction (mitigation; works on physical,
+        // which armor-only can't fully cover) + spell/disease damage-DONE scaling (physical
+        // melee is handled by the weapon-damage multiplier above, so this covers casters /
+        // Unholy / DK diseases). Amounts are driven here, not baked into the DBC.
+        if (g_cfg.UseAura)
+        {
+            if (Aura* aura = player->AddAura(SCALING_AURA, player))
+            {
+                aura->SetMaxDuration(-1);
+                aura->SetDuration(-1);   // persist until we remove it on instance exit
+                if (AuraEffect* e = aura->GetEffect(0))   // MOD_DAMAGE_PERCENT_TAKEN
+                    e->ChangeAmount(-int32(g_cfg.DamageTakenReduction));
+                if (AuraEffect* e = aura->GetEffect(1))   // MOD_DAMAGE_PERCENT_DONE (spell/disease)
+                    e->ChangeAmount(int32(damagePct));
+            }
+        }
 
         if (g_cfg.ScaleHealth)
             player->SetFullHealth();
@@ -219,7 +247,9 @@ public:
             g_cfg.Dungeons ? "on" : "off", g_cfg.Raids ? "on" : "off",
             g_cfg.Balance, g_cfg.MaxMult, g_cfg.HealthMult, g_cfg.ArmorMult, g_cfg.DamageMult,
             g_cfg.InstanceCorpsePersist ? "persist" : "decay", uint32(g_applied.size()));
-        handler->PSendSysMessage("  durability loss: %s", g_cfg.PreventDurabilityLoss ? "DISABLED" : "normal");
+        handler->PSendSysMessage("  durability loss: %s | aura: %s (dmg taken -%.0f%%, spell dmg scales)",
+            g_cfg.PreventDurabilityLoss ? "DISABLED" : "normal",
+            g_cfg.UseAura ? "ON" : "off", g_cfg.DamageTakenReduction);
         if (Player* p = handler->GetSession() ? handler->GetSession()->GetPlayer() : NULL)
         {
             std::unordered_map<uint32, AppliedMods>::iterator it = g_applied.find(p->GetGUIDLow());
