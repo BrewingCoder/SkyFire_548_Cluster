@@ -36,6 +36,12 @@
 #                            death and still loot, or clear a big room before
 #                            looting it. Looted corpses still decay normally.
 #                            Applies to direct player kills. Default 1.
+#    Solocraft.PreventDurabilityLoss
+#                            Disable ALL durability loss server-wide (death,
+#                            block-breaks, etc.). QoL for solo/family play where
+#                            clearing hard content means dying a lot, so you're
+#                            not constantly repairing. Enforced by a core gate in
+#                            Player::DurabilityPointsLoss. Default 0.
 
 Solocraft.Enable = 0
 Solocraft.Dungeons = 1
@@ -47,3 +53,4 @@ Solocraft.ScaleHealth = 1
 Solocraft.Announce = 1
 Solocraft.HealthMultiplier = 1.0
 Solocraft.InstanceCorpsePersist = 1
+Solocraft.PreventDurabilityLoss = 0

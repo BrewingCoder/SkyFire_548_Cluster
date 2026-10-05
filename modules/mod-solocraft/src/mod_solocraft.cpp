@@ -37,6 +37,7 @@ namespace
         bool  ScaleHealth = true;
         bool  Announce = true;
         bool  InstanceCorpsePersist = true;  // keep mob corpses in instances until reset (loot after a death / clear-then-loot)
+        bool  PreventDurabilityLoss = false; // disable all durability loss server-wide (solo/family QoL; enforced by a core gate)
     };
 
     SolocraftConfig g_cfg;
@@ -57,6 +58,7 @@ namespace
         g_cfg.ScaleHealth = sConfigMgr->GetBoolDefault("Solocraft.ScaleHealth", true);
         g_cfg.Announce    = sConfigMgr->GetBoolDefault("Solocraft.Announce", true);
         g_cfg.InstanceCorpsePersist = sConfigMgr->GetBoolDefault("Solocraft.InstanceCorpsePersist", true);
+        g_cfg.PreventDurabilityLoss = sConfigMgr->GetBoolDefault("Solocraft.PreventDurabilityLoss", false);
 
         if (g_cfg.Balance < 0.0f) g_cfg.Balance = 0.0f;
         if (g_cfg.MaxMult < 1.0f) g_cfg.MaxMult = 1.0f;
@@ -198,6 +200,7 @@ public:
             g_cfg.Dungeons ? "on" : "off", g_cfg.Raids ? "on" : "off",
             g_cfg.Balance, g_cfg.MaxMult, g_cfg.HealthMult,
             g_cfg.InstanceCorpsePersist ? "persist" : "decay", uint32(g_applied.size()));
+        handler->PSendSysMessage("  durability loss: %s", g_cfg.PreventDurabilityLoss ? "DISABLED" : "normal");
         if (Player* p = handler->GetSession() ? handler->GetSession()->GetPlayer() : NULL)
         {
             std::unordered_map<uint32, AppliedMods>::iterator it = g_applied.find(p->GetGUIDLow());
