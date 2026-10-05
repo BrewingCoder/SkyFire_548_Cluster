@@ -34,6 +34,7 @@ namespace
         float MaxMult  = 10.0f;   // hard cap on the stat multiplier
         float HealthMult = 1.0f;  // EXTRA health multiplier applied on top of the core multiplier
         float ArmorMult  = 1.0f;  // flat armor multiplier while scaled (physical mitigation); 1.0 = off
+        float DamageMult = 1.0f;  // extra factor on weapon-damage scaling; weapon dmg scales at (mult * this). 1.0 = scale with group size
         uint32 MinLevel = 1;
         bool  ScaleHealth = true;
         bool  Announce = true;
@@ -44,7 +45,7 @@ namespace
     SolocraftConfig g_cfg;
 
     // TOTAL_PCT amounts currently applied to a player (so we remove exactly what we added).
-    struct AppliedMods { float statPct; float healthPct; float armorPct; };
+    struct AppliedMods { float statPct; float healthPct; float armorPct; float damagePct; };
     std::unordered_map<uint32, AppliedMods> g_applied;
 
     void LoadConfig()
@@ -56,6 +57,7 @@ namespace
         g_cfg.MaxMult     = sConfigMgr->GetFloatDefault("Solocraft.MaxMultiplier", 10.0f);
         g_cfg.HealthMult  = sConfigMgr->GetFloatDefault("Solocraft.HealthMultiplier", 1.0f);
         g_cfg.ArmorMult   = sConfigMgr->GetFloatDefault("Solocraft.ArmorMultiplier", 1.0f);
+        g_cfg.DamageMult  = sConfigMgr->GetFloatDefault("Solocraft.DamageMultiplier", 1.0f);
         g_cfg.MinLevel    = uint32(sConfigMgr->GetIntDefault("Solocraft.MinLevel", 1));
         g_cfg.ScaleHealth = sConfigMgr->GetBoolDefault("Solocraft.ScaleHealth", true);
         g_cfg.Announce    = sConfigMgr->GetBoolDefault("Solocraft.Announce", true);
@@ -66,11 +68,12 @@ namespace
         if (g_cfg.MaxMult < 1.0f) g_cfg.MaxMult = 1.0f;
         if (g_cfg.HealthMult < 0.1f) g_cfg.HealthMult = 0.1f;   // keep health sane; this is an EXTRA multiplier on top of the core mult
         if (g_cfg.ArmorMult  < 0.1f) g_cfg.ArmorMult  = 0.1f;
+        if (g_cfg.DamageMult < 0.1f) g_cfg.DamageMult = 0.1f;
     }
 
     // statPct scales the five primary stats; healthPct scales max health (an independent amount
     // so health can be boosted above and beyond the core multiplier via Solocraft.HealthMultiplier).
-    void ApplyMods(Player* player, float statPct, float healthPct, float armorPct, bool apply)
+    void ApplyMods(Player* player, float statPct, float healthPct, float armorPct, float damagePct, bool apply)
     {
         for (uint8 s = STAT_STRENGTH; s < MAX_STATS; ++s)
             player->HandleStatModifier(UnitMods(UNIT_MOD_STAT_START + s), TOTAL_PCT, statPct, apply);
@@ -78,6 +81,14 @@ namespace
             player->HandleStatModifier(UNIT_MOD_HEALTH, TOTAL_PCT, healthPct, apply);
         if (armorPct != 0.0f)
             player->HandleStatModifier(UNIT_MOD_ARMOR, TOTAL_PCT, armorPct, apply);  // physical mitigation
+        if (damagePct != 0.0f)
+        {
+            // Scale the weapon-damage term too: a weapon class's DPS comes mostly from weapon
+            // damage (an item property stats never touch), so stat scaling alone barely moves it.
+            player->HandleStatModifier(UNIT_MOD_DAMAGE_MAINHAND, TOTAL_PCT, damagePct, apply);
+            player->HandleStatModifier(UNIT_MOD_DAMAGE_OFFHAND,  TOTAL_PCT, damagePct, apply);
+            player->HandleStatModifier(UNIT_MOD_DAMAGE_RANGED,   TOTAL_PCT, damagePct, apply);
+        }
     }
 
     void RemoveBuff(Player* player)
@@ -87,7 +98,7 @@ namespace
         std::unordered_map<uint32, AppliedMods>::iterator it = g_applied.find(player->GetGUIDLow());
         if (it == g_applied.end())
             return;
-        ApplyMods(player, it->second.statPct, it->second.healthPct, it->second.armorPct, false);
+        ApplyMods(player, it->second.statPct, it->second.healthPct, it->second.armorPct, it->second.damagePct, false);
         g_applied.erase(it);
     }
 
@@ -130,8 +141,10 @@ namespace
         float healthMult = mult * g_cfg.HealthMult;            // health gets an extra independent float on top
         float healthPct = (healthMult - 1.0f) * 100.0f;        // TOTAL_PCT amount for max health
         float armorPct  = (g_cfg.ArmorMult - 1.0f) * 100.0f;   // flat armor multiplier while scaled (0 = off)
-        ApplyMods(player, statPct, healthPct, armorPct, true);
-        g_applied[player->GetGUIDLow()] = { statPct, healthPct, armorPct };
+        float damageMult = mult * g_cfg.DamageMult;            // weapon damage scales with group size (x DamageMult extra)
+        float damagePct = (damageMult - 1.0f) * 100.0f;        // TOTAL_PCT on weapon damage
+        ApplyMods(player, statPct, healthPct, armorPct, damagePct, true);
+        g_applied[player->GetGUIDLow()] = { statPct, healthPct, armorPct, damagePct };
 
         if (g_cfg.ScaleHealth)
             player->SetFullHealth();
@@ -201,17 +214,17 @@ public:
 
     static bool HandleStatus(ChatHandler* handler, char const* /*args*/)
     {
-        handler->PSendSysMessage("Solocraft: %s | dungeons:%s raids:%s | balance:%.2f cap:x%.1f healthx:%.2f armorx:%.2f | corpses:%s | active buffs:%u",
+        handler->PSendSysMessage("Solocraft: %s | dungeons:%s raids:%s | balance:%.2f cap:x%.1f healthx:%.2f armorx:%.2f dmgx:%.2f | corpses:%s | active buffs:%u",
             g_cfg.Enable ? "ENABLED" : "disabled",
             g_cfg.Dungeons ? "on" : "off", g_cfg.Raids ? "on" : "off",
-            g_cfg.Balance, g_cfg.MaxMult, g_cfg.HealthMult, g_cfg.ArmorMult,
+            g_cfg.Balance, g_cfg.MaxMult, g_cfg.HealthMult, g_cfg.ArmorMult, g_cfg.DamageMult,
             g_cfg.InstanceCorpsePersist ? "persist" : "decay", uint32(g_applied.size()));
         handler->PSendSysMessage("  durability loss: %s", g_cfg.PreventDurabilityLoss ? "DISABLED" : "normal");
         if (Player* p = handler->GetSession() ? handler->GetSession()->GetPlayer() : NULL)
         {
             std::unordered_map<uint32, AppliedMods>::iterator it = g_applied.find(p->GetGUIDLow());
             if (it != g_applied.end())
-                handler->PSendSysMessage("  You are scaled: +%.0f%% stats, +%.0f%% health, +%.0f%% armor.", it->second.statPct, it->second.healthPct, it->second.armorPct);
+                handler->PSendSysMessage("  You are scaled: +%.0f%% stats, +%.0f%% health, +%.0f%% armor, +%.0f%% weapon dmg.", it->second.statPct, it->second.healthPct, it->second.armorPct, it->second.damagePct);
         }
         return true;
     }

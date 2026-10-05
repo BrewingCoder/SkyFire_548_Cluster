@@ -34,6 +34,15 @@
 #                            damage mitigation). Smooth, no RNG, no buff icon;
 #                            applied/removed with the rest of the scaling. Does
 #                            nothing vs magic. 1.0 = off. Default 1.0.
+#    Solocraft.DamageMultiplier
+#                            Scales the WEAPON-DAMAGE term while scaled. A weapon
+#                            class's DPS comes mostly from weapon damage (an item
+#                            property that primary-stat scaling never touches), so
+#                            without this a x5 stat boost barely moves melee/ranged
+#                            damage. Weapon damage is scaled at (group_mult x this),
+#                            so 1.0 = weapon damage scales with the group size
+#                            (recommended), >1 adds extra. Affects melee/ranged only
+#                            (not spell/pet damage). Default 1.0.
 #    Solocraft.InstanceCorpsePersist
 #                            Keep killed mob corpses (and their loot) in an
 #                            instance until the instance resets, instead of the
@@ -58,5 +67,6 @@ Solocraft.ScaleHealth = 1
 Solocraft.Announce = 1
 Solocraft.HealthMultiplier = 1.0
 Solocraft.ArmorMultiplier = 1.0
+Solocraft.DamageMultiplier = 1.0
 Solocraft.InstanceCorpsePersist = 1
 Solocraft.PreventDurabilityLoss = 0
