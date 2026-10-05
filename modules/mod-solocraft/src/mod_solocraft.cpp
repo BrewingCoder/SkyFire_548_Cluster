@@ -30,6 +30,7 @@ namespace
         bool  Raids    = true;
         float Balance  = 0.6f;    // fraction of linear (maxPlayers/actual) scaling applied
         float MaxMult  = 10.0f;   // hard cap on the stat multiplier
+        float HealthMult = 1.0f;  // EXTRA health multiplier applied on top of the core multiplier
         uint32 MinLevel = 1;
         bool  ScaleHealth = true;
         bool  Announce = true;
@@ -37,8 +38,9 @@ namespace
 
     SolocraftConfig g_cfg;
 
-    // guid -> TOTAL_PCT amount currently applied (so we remove exactly what we added).
-    std::unordered_map<uint32, float> g_applied;
+    // TOTAL_PCT amounts currently applied to a player (so we remove exactly what we added).
+    struct AppliedMods { float statPct; float healthPct; };
+    std::unordered_map<uint32, AppliedMods> g_applied;
 
     void LoadConfig()
     {
@@ -47,30 +49,34 @@ namespace
         g_cfg.Raids       = sConfigMgr->GetBoolDefault("Solocraft.Raids", true);
         g_cfg.Balance     = sConfigMgr->GetFloatDefault("Solocraft.Balance", 0.6f);
         g_cfg.MaxMult     = sConfigMgr->GetFloatDefault("Solocraft.MaxMultiplier", 10.0f);
+        g_cfg.HealthMult  = sConfigMgr->GetFloatDefault("Solocraft.HealthMultiplier", 1.0f);
         g_cfg.MinLevel    = uint32(sConfigMgr->GetIntDefault("Solocraft.MinLevel", 1));
         g_cfg.ScaleHealth = sConfigMgr->GetBoolDefault("Solocraft.ScaleHealth", true);
         g_cfg.Announce    = sConfigMgr->GetBoolDefault("Solocraft.Announce", true);
 
         if (g_cfg.Balance < 0.0f) g_cfg.Balance = 0.0f;
         if (g_cfg.MaxMult < 1.0f) g_cfg.MaxMult = 1.0f;
+        if (g_cfg.HealthMult < 0.1f) g_cfg.HealthMult = 0.1f;   // keep health sane; this is an EXTRA multiplier on top of the core mult
     }
 
-    void ApplyMods(Player* player, float pct, bool apply)
+    // statPct scales the five primary stats; healthPct scales max health (an independent amount
+    // so health can be boosted above and beyond the core multiplier via Solocraft.HealthMultiplier).
+    void ApplyMods(Player* player, float statPct, float healthPct, bool apply)
     {
         for (uint8 s = STAT_STRENGTH; s < MAX_STATS; ++s)
-            player->HandleStatModifier(UnitMods(UNIT_MOD_STAT_START + s), TOTAL_PCT, pct, apply);
+            player->HandleStatModifier(UnitMods(UNIT_MOD_STAT_START + s), TOTAL_PCT, statPct, apply);
         if (g_cfg.ScaleHealth)
-            player->HandleStatModifier(UNIT_MOD_HEALTH, TOTAL_PCT, pct, apply);
+            player->HandleStatModifier(UNIT_MOD_HEALTH, TOTAL_PCT, healthPct, apply);
     }
 
     void RemoveBuff(Player* player)
     {
         if (!player)
             return;
-        std::unordered_map<uint32, float>::iterator it = g_applied.find(player->GetGUIDLow());
+        std::unordered_map<uint32, AppliedMods>::iterator it = g_applied.find(player->GetGUIDLow());
         if (it == g_applied.end())
             return;
-        ApplyMods(player, it->second, false);
+        ApplyMods(player, it->second.statPct, it->second.healthPct, false);
         g_applied.erase(it);
     }
 
@@ -109,17 +115,19 @@ namespace
         if (mult <= 1.0f)
             return;
 
-        float pct = (mult - 1.0f) * 100.0f;   // TOTAL_PCT amount
-        ApplyMods(player, pct, true);
-        g_applied[player->GetGUIDLow()] = pct;
+        float statPct   = (mult - 1.0f) * 100.0f;              // primary stats -> x mult
+        float healthMult = mult * g_cfg.HealthMult;            // health gets an extra independent float on top
+        float healthPct = (healthMult - 1.0f) * 100.0f;        // TOTAL_PCT amount for max health
+        ApplyMods(player, statPct, healthPct, true);
+        g_applied[player->GetGUIDLow()] = { statPct, healthPct };
 
         if (g_cfg.ScaleHealth)
             player->SetFullHealth();
 
         if (g_cfg.Announce && player->GetSession())
             ChatHandler(player->GetSession()).PSendSysMessage(
-                "|cff00ff00[Solocraft]|r scaled your stats x%.1f for this %s (%u/%u players).",
-                mult, isRaid ? "raid" : "dungeon", actual, maxPlayers);
+                "|cff00ff00[Solocraft]|r scaled your stats x%.1f (health x%.1f) for this %s (%u/%u players).",
+                mult, healthMult, isRaid ? "raid" : "dungeon", actual, maxPlayers);
     }
 }
 
@@ -166,15 +174,15 @@ public:
 
     static bool HandleStatus(ChatHandler* handler, char const* /*args*/)
     {
-        handler->PSendSysMessage("Solocraft: %s | dungeons:%s raids:%s | balance:%.2f cap:x%.1f | active buffs:%u",
+        handler->PSendSysMessage("Solocraft: %s | dungeons:%s raids:%s | balance:%.2f cap:x%.1f healthx:%.2f | active buffs:%u",
             g_cfg.Enable ? "ENABLED" : "disabled",
             g_cfg.Dungeons ? "on" : "off", g_cfg.Raids ? "on" : "off",
-            g_cfg.Balance, g_cfg.MaxMult, uint32(g_applied.size()));
+            g_cfg.Balance, g_cfg.MaxMult, g_cfg.HealthMult, uint32(g_applied.size()));
         if (Player* p = handler->GetSession() ? handler->GetSession()->GetPlayer() : NULL)
         {
-            std::unordered_map<uint32, float>::iterator it = g_applied.find(p->GetGUIDLow());
+            std::unordered_map<uint32, AppliedMods>::iterator it = g_applied.find(p->GetGUIDLow());
             if (it != g_applied.end())
-                handler->PSendSysMessage("  You are scaled: +%.0f%% stats.", it->second);
+                handler->PSendSysMessage("  You are scaled: +%.0f%% stats, +%.0f%% health.", it->second.statPct, it->second.healthPct);
         }
         return true;
     }
