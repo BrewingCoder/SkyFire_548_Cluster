@@ -18,6 +18,8 @@
 #include "Map.h"
 #include "Chat.h"
 #include "Unit.h"
+#include "Creature.h"
+#include "Common.h"
 #include "SharedDefines.h"
 #include <unordered_map>
 
@@ -34,6 +36,7 @@ namespace
         uint32 MinLevel = 1;
         bool  ScaleHealth = true;
         bool  Announce = true;
+        bool  InstanceCorpsePersist = true;  // keep mob corpses in instances until reset (loot after a death / clear-then-loot)
     };
 
     SolocraftConfig g_cfg;
@@ -53,6 +56,7 @@ namespace
         g_cfg.MinLevel    = uint32(sConfigMgr->GetIntDefault("Solocraft.MinLevel", 1));
         g_cfg.ScaleHealth = sConfigMgr->GetBoolDefault("Solocraft.ScaleHealth", true);
         g_cfg.Announce    = sConfigMgr->GetBoolDefault("Solocraft.Announce", true);
+        g_cfg.InstanceCorpsePersist = sConfigMgr->GetBoolDefault("Solocraft.InstanceCorpsePersist", true);
 
         if (g_cfg.Balance < 0.0f) g_cfg.Balance = 0.0f;
         if (g_cfg.MaxMult < 1.0f) g_cfg.MaxMult = 1.0f;
@@ -138,6 +142,21 @@ public:
 
     void OnMapChanged(Player* player) override { Evaluate(player); }
     void OnLogin(Player* player, bool /*firstLogin*/) override { Evaluate(player); }
+
+    // Keep mob corpses (and their loot) alive in instances until the instance resets, so a solo
+    // player can run back after a death and still loot, and can clear a room before looting it.
+    // setDeathState(JUST_DIED) has already set the normal corpse-remove time by the time this fires;
+    // we push it out so the corpse does not decay while players are still inside the instance.
+    // Note: only fires for direct player kills (pet/guardian killing blows go through a different path).
+    void OnCreatureKill(Player* /*killer*/, Creature* killed) override
+    {
+        if (!g_cfg.Enable || !g_cfg.InstanceCorpsePersist || !killed)
+            return;
+        Map* map = killed->GetMap();
+        if (!map || !map->Instanceable())
+            return;
+        killed->SetCorpseRemoveTime(time(NULL) + WEEK);   // effectively "until instance reset/unload"
+    }
     void OnLogout(Player* player) override
     {
         if (player)
@@ -174,10 +193,11 @@ public:
 
     static bool HandleStatus(ChatHandler* handler, char const* /*args*/)
     {
-        handler->PSendSysMessage("Solocraft: %s | dungeons:%s raids:%s | balance:%.2f cap:x%.1f healthx:%.2f | active buffs:%u",
+        handler->PSendSysMessage("Solocraft: %s | dungeons:%s raids:%s | balance:%.2f cap:x%.1f healthx:%.2f | corpses:%s | active buffs:%u",
             g_cfg.Enable ? "ENABLED" : "disabled",
             g_cfg.Dungeons ? "on" : "off", g_cfg.Raids ? "on" : "off",
-            g_cfg.Balance, g_cfg.MaxMult, g_cfg.HealthMult, uint32(g_applied.size()));
+            g_cfg.Balance, g_cfg.MaxMult, g_cfg.HealthMult,
+            g_cfg.InstanceCorpsePersist ? "persist" : "decay", uint32(g_applied.size()));
         if (Player* p = handler->GetSession() ? handler->GetSession()->GetPlayer() : NULL)
         {
             std::unordered_map<uint32, AppliedMods>::iterator it = g_applied.find(p->GetGUIDLow());

@@ -461,6 +461,7 @@ public:
 
     void SetCorpseDelay(uint32 delay) { m_corpseDelay = delay; }
     uint32 GetCorpseDelay() const { return m_corpseDelay; }
+    void SetCorpseRemoveTime(time_t removeTime) { m_corpseRemoveTime = removeTime; } // [lab] lets mod-solocraft keep instance corpses until reset
     bool IsRacialLeader() const { return GetCreatureTemplate()->RacialLeader; }
     bool IsCivilian() const { return GetCreatureTemplate()->flags_extra & CREATURE_FLAG_EXTRA_CIVILIAN; }
     bool IsTrigger() const { return GetCreatureTemplate()->flags_extra & CREATURE_FLAG_EXTRA_TRIGGER; }
