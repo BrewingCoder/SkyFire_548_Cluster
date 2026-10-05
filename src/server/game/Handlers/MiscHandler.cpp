@@ -44,6 +44,7 @@
 #include "WorldPacket.h"
 #include "WorldSession.h"
 #include "zlib.h"
+#include "HookMgr.h"   // [lab] Eluna gossip-select hooks (upstream SkyFire never wires them)
 
 #include <cstddef>
 
@@ -700,9 +701,13 @@ void WorldSession::HandleGossipSelectOptionOpcode(WorldPacket& recvData)
     {
         if (unit)
         {
-            unit->AI()->sGossipSelectCode(_player, request.menuId, request.gossipListId, request.code.c_str());
-            if (!sScriptMgr->OnGossipSelectCode(_player, unit, _player->PlayerTalkClass->GetGossipOptionSender(request.gossipListId), _player->PlayerTalkClass->GetGossipOptionAction(request.gossipListId), request.code.c_str()))
-                _player->OnGossipSelect(unit, request.gossipListId, request.menuId);
+            // [lab] Eluna gossip-select-with-code first
+            if (!sHookMgr->OnGossipSelectCode(_player, unit, _player->PlayerTalkClass->GetGossipOptionSender(request.gossipListId), _player->PlayerTalkClass->GetGossipOptionAction(request.gossipListId), request.code.c_str()))
+            {
+                unit->AI()->sGossipSelectCode(_player, request.menuId, request.gossipListId, request.code.c_str());
+                if (!sScriptMgr->OnGossipSelectCode(_player, unit, _player->PlayerTalkClass->GetGossipOptionSender(request.gossipListId), _player->PlayerTalkClass->GetGossipOptionAction(request.gossipListId), request.code.c_str()))
+                    _player->OnGossipSelect(unit, request.gossipListId, request.menuId);
+            }
         }
         else
         {
@@ -714,9 +719,13 @@ void WorldSession::HandleGossipSelectOptionOpcode(WorldPacket& recvData)
     {
         if (unit)
         {
-            unit->AI()->sGossipSelect(_player, request.menuId, request.gossipListId);
-            if (!sScriptMgr->OnGossipSelect(_player, unit, _player->PlayerTalkClass->GetGossipOptionSender(request.gossipListId), _player->PlayerTalkClass->GetGossipOptionAction(request.gossipListId)))
-                _player->OnGossipSelect(unit, request.gossipListId, request.menuId);
+            // [lab] Eluna gossip-select first
+            if (!sHookMgr->OnGossipSelect(_player, unit, _player->PlayerTalkClass->GetGossipOptionSender(request.gossipListId), _player->PlayerTalkClass->GetGossipOptionAction(request.gossipListId)))
+            {
+                unit->AI()->sGossipSelect(_player, request.menuId, request.gossipListId);
+                if (!sScriptMgr->OnGossipSelect(_player, unit, _player->PlayerTalkClass->GetGossipOptionSender(request.gossipListId), _player->PlayerTalkClass->GetGossipOptionAction(request.gossipListId)))
+                    _player->OnGossipSelect(unit, request.gossipListId, request.menuId);
+            }
         }
         else
         {

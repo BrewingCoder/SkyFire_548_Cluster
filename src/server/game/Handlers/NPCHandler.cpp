@@ -25,6 +25,7 @@
 #include "UpdateMask.h"
 #include "WorldPacket.h"
 #include "WorldSession.h"
+#include "HookMgr.h"   // [lab] Eluna gossip hooks (upstream SkyFire never wires them)
 
 #include <vector>
 
@@ -336,7 +337,8 @@ void WorldSession::HandleGossipHelloOpcode(WorldPacket& recvData)
     }
 
     _player->PlayerTalkClass->ClearMenus();
-    if (!sScriptMgr->OnGossipHello(_player, unit) && !unit->AI()->OnGossipHello(_player))
+    // [lab] run the Eluna gossip-hello hook first; upstream SkyFire defines HookMgr::OnGossipHello but never calls it
+    if (!sHookMgr->OnGossipHello(_player, unit) && !sScriptMgr->OnGossipHello(_player, unit) && !unit->AI()->OnGossipHello(_player))
     {
         _player->TalkedToCreature(unit->GetEntry(), unit->GetGUID());
         _player->PrepareGossipMenu(unit, unit->GetCreatureTemplate()->GossipMenuId, true);
