@@ -14,10 +14,23 @@ EndScriptData */
 #include "InstanceScript.h"
 #include "blood_furnace.h"
 #include "CreatureAI.h"
+#include "MotionMaster.h"
 
 #define ENTRY_SEWER1                 181823
 #define ENTRY_SEWER2                 181766
 #define MAX_ENCOUNTER                   3
+
+// [lab] Broggok pre-event completion. The released prisoners used to be thrown straight into
+// combat from inside their cages (RemoveFlag + SetInCombatWithZone), relying on generic chase to
+// path them out. On this MoP fork that cage-exit chase produces a zero-duration spline: the client
+// teleports a "ghost" onto the player while the server leaves the creature in the cell (~70yd away),
+// so the orcs read as unkillable/out-of-range. Fix: on release, straight-line walk each prisoner to
+// an open muster point first (generatePath=false bypasses the broken exit path), THEN engage once it
+// arrives (see ActivatePrisoners/EngagePrisoner/Update). Chasing from the open room works normally.
+#define POINT_PRISONER_MUSTER           1
+static float const BroggokMusterX = 455.0f;
+static float const BroggokMusterY = 65.0f;
+static float const BroggokMusterZ = 9.62f;
 
 class instance_blood_furnace : public InstanceMapScript
 {
@@ -61,6 +74,9 @@ class instance_blood_furnace : public InstanceMapScript
 
             uint64 BroggokLeverGUID;
 
+            std::set<uint64> MusteringPrisoners;   // [lab] released prisoners walking to the muster point
+            uint32 MusterSafetyTimer;              // [lab] fallback: force-engage anyone still en route
+
             uint32 m_auiEncounter[MAX_ENCOUNTER];
             std::string str_data;
 
@@ -99,6 +115,9 @@ class instance_blood_furnace : public InstanceMapScript
                 PrisonerCounter8 = 0;
 
                 BroggokLeverGUID = 0;
+
+                MusteringPrisoners.clear();        // [lab]
+                MusterSafetyTimer = 0;             // [lab]
             }
 
             void OnCreatureCreate(Creature* creature) OVERRIDE
@@ -387,12 +406,58 @@ class instance_blood_furnace : public InstanceMapScript
 
             void ActivatePrisoners(const std::set<uint64>& prisoners)
             {
+                // [lab] Stage-then-engage. Keep each prisoner immune + passive (ResetPrisoner already
+                // set the immune flags) and straight-line walk it to the open muster point. The
+                // generatePath=false is the crux: it skips the broken cage-exit pathfinding that
+                // yielded a zero-duration spline. Prisoners "release" (become attackable + aggressive)
+                // on arrival, in Update().
                 for (std::set<uint64>::const_iterator i = prisoners.begin(); i != prisoners.end(); ++i)
                     if (Creature* prisoner = instance->GetCreature(*i))
                     {
-                        prisoner->RemoveFlag(UNIT_FIELD_FLAGS, UNIT_FLAG_IMMUNE_TO_PC | UNIT_FLAG_IMMUNE_TO_NPC | UNIT_FLAG_NON_ATTACKABLE);
-                        prisoner->SetInCombatWithZone();
+                        prisoner->SetReactState(REACT_PASSIVE);
+                        prisoner->GetMotionMaster()->MovePoint(POINT_PRISONER_MUSTER, BroggokMusterX, BroggokMusterY, BroggokMusterZ, false);
+                        MusteringPrisoners.insert(*i);
                     }
+                MusterSafetyTimer = 15000;         // [lab] fallback window if someone can't reach the point
+            }
+
+            void EngagePrisoner(Creature* prisoner)
+            {
+                // [lab] clear the cage immunities and let it fight from the open room
+                prisoner->RemoveFlag(UNIT_FIELD_FLAGS, UNIT_FLAG_IMMUNE_TO_PC | UNIT_FLAG_IMMUNE_TO_NPC | UNIT_FLAG_NON_ATTACKABLE);
+                prisoner->SetReactState(REACT_AGGRESSIVE);
+                prisoner->SetInCombatWithZone();
+            }
+
+            void Update(uint32 diff) OVERRIDE
+            {
+                if (MusteringPrisoners.empty())
+                    return;
+
+                // [lab] force-engage fallback so a prisoner that can't reach the point never deadlocks the wave
+                bool force = false;
+                if (MusterSafetyTimer <= diff)
+                    force = true;
+                else
+                    MusterSafetyTimer -= diff;
+
+                for (std::set<uint64>::iterator i = MusteringPrisoners.begin(); i != MusteringPrisoners.end(); )
+                {
+                    Creature* prisoner = instance->GetCreature(*i);
+                    if (!prisoner || !prisoner->IsAlive())
+                    {
+                        MusteringPrisoners.erase(i++);
+                        continue;
+                    }
+
+                    if (force || prisoner->GetExactDist2d(BroggokMusterX, BroggokMusterY) < 4.0f)
+                    {
+                        EngagePrisoner(prisoner);
+                        MusteringPrisoners.erase(i++);
+                    }
+                    else
+                        ++i;
+                }
             }
         };
 
