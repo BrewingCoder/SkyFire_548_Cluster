@@ -61,9 +61,9 @@ const float ShadowmoonChannelers[5][4]=
 // ring degenerates into a zero-duration spline on this core and teleports ("ghosts") the
 // wall-adjacent channelers through the walls; the straight-line muster (generatePath=false) avoids it.
 #define POINT_CHANNELER_MUSTER           1
-static float const KelidanMusterX = 323.0f;
-static float const KelidanMusterY = -87.0f;
-static float const KelidanMusterZ = -24.6f;
+static float const KelidanMusterX = 325.5164f;
+static float const KelidanMusterY = -106.4300f;
+static float const KelidanMusterZ = -24.6653f;
 
 class boss_kelidan_the_breaker : public CreatureScript
 {
