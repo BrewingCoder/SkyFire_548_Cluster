@@ -21,9 +21,8 @@
 #include "Creature.h"
 #include "Common.h"
 #include "SharedDefines.h"
-#include "SpellAuras.h"        // scaling aura (AddAura/SetDuration/GetEffect)
-#include "SpellAuraEffects.h"  // AuraEffect::ChangeAmount
 #include <unordered_map>
+#include <mutex>
 
 namespace
 {
@@ -42,17 +41,17 @@ namespace
         bool  Announce = true;
         bool  InstanceCorpsePersist = true;  // keep mob corpses in instances until reset (loot after a death / clear-then-loot)
         bool  PreventDurabilityLoss = false; // disable all durability loss server-wide (solo/family QoL; enforced by a core gate)
-        bool  UseAura = true;                // apply the scaling aura (all-school damage-taken mitigation + spell/disease damage done)
-        float DamageTakenReduction = 0.0f;   // % all-school incoming damage reduction via the aura while scaled; 0 = off
+        bool  UseAura = true;                // master toggle for the all-school incoming-damage reduction (name kept for config compat)
+        float DamageTakenReduction = 0.0f;   // % all-school incoming damage reduction while scaled; 0 = off
     };
-
-    uint32 const SCALING_AURA = 32172;       // carrier: "[PH] Buffbot Buff Effect", effects overridden in sql/lab/02_solocraft_scaling_aura.sql
 
     SolocraftConfig g_cfg;
 
     // TOTAL_PCT amounts currently applied to a player (so we remove exactly what we added).
+    // Membership also marks "this player is currently scaled" for the OnDamage reduction hook.
     struct AppliedMods { float statPct; float healthPct; float armorPct; float damagePct; };
     std::unordered_map<uint32, AppliedMods> g_applied;
+    std::mutex g_applied_mutex;  // guards g_applied (read on the hot OnDamage path, written on map change)
 
     void LoadConfig()
     {
@@ -105,7 +104,7 @@ namespace
     {
         if (!player)
             return;
-        player->RemoveAura(SCALING_AURA);   // always clear the scaling aura (idempotent; handles UseAura toggled off)
+        std::lock_guard<std::mutex> lock(g_applied_mutex);
         std::unordered_map<uint32, AppliedMods>::iterator it = g_applied.find(player->GetGUIDLow());
         if (it == g_applied.end())
             return;
@@ -155,24 +154,18 @@ namespace
         float damageMult = mult * g_cfg.DamageMult;            // weapon damage scales with group size (x DamageMult extra)
         float damagePct = (damageMult - 1.0f) * 100.0f;        // TOTAL_PCT on weapon damage
         ApplyMods(player, statPct, healthPct, armorPct, damagePct, true);
-        g_applied[player->GetGUIDLow()] = { statPct, healthPct, armorPct, damagePct };
-
-        // Scaling aura: all-school damage-TAKEN reduction (mitigation; works on physical,
-        // which armor-only can't fully cover) + spell/disease damage-DONE scaling (physical
-        // melee is handled by the weapon-damage multiplier above, so this covers casters /
-        // Unholy / DK diseases). Amounts are driven here, not baked into the DBC.
-        if (g_cfg.UseAura)
         {
-            if (Aura* aura = player->AddAura(SCALING_AURA, player))
-            {
-                aura->SetMaxDuration(-1);
-                aura->SetDuration(-1);   // persist until we remove it on instance exit
-                if (AuraEffect* e = aura->GetEffect(0))   // MOD_DAMAGE_PERCENT_TAKEN
-                    e->ChangeAmount(-int32(g_cfg.DamageTakenReduction));
-                if (AuraEffect* e = aura->GetEffect(1))   // MOD_DAMAGE_PERCENT_DONE (spell/disease)
-                    e->ChangeAmount(int32(damagePct));
-            }
+            std::lock_guard<std::mutex> lock(g_applied_mutex);
+            g_applied[player->GetGUIDLow()] = { statPct, healthPct, armorPct, damagePct };
         }
+
+        // Incoming-damage reduction is applied in mod_solocraft_unitscript::OnDamage
+        // (DealDamage is the universal sink, so it covers physical/spell/periodic alike).
+        // The old approach rolled a carrier aura (32172) whose effects we tried to override
+        // via world.spelleffect_dbc -- but this core builds SpellInfo purely from the
+        // SpellEffect.dbc file and never reads that table, so the aura was a no-op (measured:
+        // not present client-side, periodic damage flat). Driving it in code fixes that and
+        // also covers physical melee, which MOD_DAMAGE_PERCENT_DONE excludes.
 
         if (g_cfg.ScaleHealth)
             player->SetFullHealth();
@@ -208,8 +201,36 @@ public:
     }
     void OnLogout(Player* player) override
     {
-        if (player)
-            g_applied.erase(player->GetGUIDLow());   // runtime mods vanish on logout anyway
+        if (!player)
+            return;
+        std::lock_guard<std::mutex> lock(g_applied_mutex);
+        g_applied.erase(player->GetGUIDLow());   // runtime mods vanish on logout anyway
+    }
+};
+
+// Incoming-damage reduction for scaled players. Unit::DealDamage is the single sink for
+// ALL damage (melee, spell, periodic/DoT, environmental), so this one hook mitigates every
+// type -- including physical, which an aura-based MOD_DAMAGE_PERCENT_DONE never could.
+class mod_solocraft_unitscript : public UnitScript
+{
+public:
+    mod_solocraft_unitscript() : UnitScript("mod_solocraft_unitscript") { }
+
+    void OnDamage(Unit* /*attacker*/, Unit* victim, uint32& damage) override
+    {
+        if (!g_cfg.Enable || !g_cfg.UseAura || g_cfg.DamageTakenReduction <= 0.0f)
+            return;
+        if (!damage || !victim || victim->GetTypeId() != TypeID::TYPEID_PLAYER)
+            return;
+
+        {
+            std::lock_guard<std::mutex> lock(g_applied_mutex);
+            if (g_applied.find(victim->GetGUIDLow()) == g_applied.end())
+                return;   // only players currently scaled by solocraft
+        }
+
+        float factor = 1.0f - (g_cfg.DamageTakenReduction / 100.0f);
+        damage = uint32(float(damage) * factor);
     }
 };
 
@@ -247,9 +268,9 @@ public:
             g_cfg.Dungeons ? "on" : "off", g_cfg.Raids ? "on" : "off",
             g_cfg.Balance, g_cfg.MaxMult, g_cfg.HealthMult, g_cfg.ArmorMult, g_cfg.DamageMult,
             g_cfg.InstanceCorpsePersist ? "persist" : "decay", uint32(g_applied.size()));
-        handler->PSendSysMessage("  durability loss: %s | aura: %s (dmg taken -%.0f%%, spell dmg scales)",
+        handler->PSendSysMessage("  durability loss: %s | incoming-dmg reduction: %s -%.0f%% (code hook, all schools)",
             g_cfg.PreventDurabilityLoss ? "DISABLED" : "normal",
-            g_cfg.UseAura ? "ON" : "off", g_cfg.DamageTakenReduction);
+            (g_cfg.UseAura && g_cfg.DamageTakenReduction > 0.0f) ? "ON" : "off", g_cfg.DamageTakenReduction);
         if (Player* p = handler->GetSession() ? handler->GetSession()->GetPlayer() : NULL)
         {
             std::unordered_map<uint32, AppliedMods>::iterator it = g_applied.find(p->GetGUIDLow());
@@ -277,6 +298,7 @@ public:
 void AddSC_mod_solocraft()
 {
     new mod_solocraft_playerscript();
+    new mod_solocraft_unitscript();
     new mod_solocraft_worldscript();
     new mod_solocraft_commandscript();
 }
