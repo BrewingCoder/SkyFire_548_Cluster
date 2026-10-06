@@ -14,6 +14,7 @@
 #include "Player.h"
 #include "ScriptLoader.h"
 #include "ScriptMgr.h"
+#include "HookMgr.h" // [lab] revive Eluna player hooks (OnLogin/OnMapChanged) — upstream never wires them
 #include "ScriptSystem.h"
 #include "SpellInfo.h"
 #include "SpellScript.h"
@@ -580,6 +581,7 @@ void ScriptMgr::OnPlayerEnterMap(Map* map, Player* player)
     ASSERT(player);
 
     FOREACH_SCRIPT(PlayerScript)->OnMapChanged(player);
+    sHookMgr->OnMapChanged(player); // [lab] fire the Eluna map-change hook too (was dead)
 
     SCR_MAP_BGN(WorldMapScript, map, itr, end, entry, IsWorldMap);
     itr->second->OnPlayerEnter(map, player);
@@ -1236,6 +1238,7 @@ void ScriptMgr::OnPlayerSpellCast(Player* player, Spell* spell, bool skipCheck)
 void ScriptMgr::OnPlayerLogin(Player* player, bool firstLogin)
 {
     FOREACH_SCRIPT(PlayerScript)->OnLogin(player, firstLogin);
+    sHookMgr->OnLogin(player); // [lab] fire the Eluna login hook too (was dead)
 }
 
 void ScriptMgr::OnPlayerLogout(Player* player)
