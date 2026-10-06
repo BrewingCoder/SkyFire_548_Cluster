@@ -19,6 +19,7 @@ EndContentData */
 #include "ScriptedCreature.h"
 #include "SpellAuras.h"
 #include "blood_furnace.h"
+#include "MotionMaster.h"
 
 enum Kelidan
 {
@@ -54,6 +55,15 @@ const float ShadowmoonChannelers[5][4]=
     {344.0f, -103.5f, -24.5f, 2.356f},
     {316.0f, -109.0f, -24.6f, 1.257f}
 };
+
+// [lab] Muster point: the open centre of Keli'dan's ritual chamber (he stands at ~325,-87,-24.65).
+// Engaged channelers straight-line walk here first, THEN chase. Chasing directly out of the ritual
+// ring degenerates into a zero-duration spline on this core and teleports ("ghosts") the
+// wall-adjacent channelers through the walls; the straight-line muster (generatePath=false) avoids it.
+#define POINT_CHANNELER_MUSTER           1
+static float const KelidanMusterX = 323.0f;
+static float const KelidanMusterY = -87.0f;
+static float const KelidanMusterZ = -24.6f;
 
 class boss_kelidan_the_breaker : public CreatureScript
 {
@@ -287,14 +297,58 @@ class npc_shadowmoon_channeler : public CreatureScript
             uint32 ShadowBolt_Timer;
             uint32 MarkOfShadow_Timer;
             uint32 check_Timer;
+            bool Mustered;          // [lab] has reached the centre staging point
+            bool Mustering;         // [lab] currently walking to the muster point
+            uint64 EngageVictim;    // [lab] whom to chase once mustered
 
             void Reset() OVERRIDE
             {
                 ShadowBolt_Timer = 1000+rand()%1000;
                 MarkOfShadow_Timer = 5000+rand()%2000;
                 check_Timer = 0;
+                Mustered = false;       // [lab]
+                Mustering = false;      // [lab]
+                EngageVictim = 0;       // [lab]
                 if (me->IsNonMeleeSpellCasted(false))
                     me->InterruptNonMeleeSpells(true);
+            }
+
+            // [lab] Straight-line walk to the open centre, then engage. Replaces the direct MoveChase
+            // out of the ritual ring, which degenerates into a zero-duration spline (teleport/"ghost")
+            // for wall-adjacent channelers on this core. generatePath=false forces the straight line.
+            void StartMuster(Unit* who)
+            {
+                if (!who)
+                    return;
+                EngageVictim = who->GetGUID();
+                if (Mustered || Mustering)
+                    return;
+                Mustering = true;
+                me->GetMotionMaster()->MovePoint(POINT_CHANNELER_MUSTER, KelidanMusterX, KelidanMusterY, KelidanMusterZ, false);
+            }
+
+            void AttackStart(Unit* who) OVERRIDE
+            {
+                if (!who)
+                    return;
+                if (Mustered)
+                {
+                    ScriptedAI::AttackStart(who);       // normal chase from the open centre
+                    return;
+                }
+                AttackStartNoMove(who);                 // [lab] acquire target, do not chase yet
+                StartMuster(who);
+            }
+
+            void MovementInform(uint32 type, uint32 id) OVERRIDE
+            {
+                if (type == POINT_MOTION_TYPE && id == POINT_CHANNELER_MUSTER)
+                {
+                    Mustering = false;
+                    Mustered = true;
+                    if (Unit* victim = Unit::GetUnit(*me, EngageVictim))
+                        AttackStart(victim);            // Mustered -> real chase from centre
+                }
             }
 
             void EnterCombat(Unit* who) OVERRIDE
@@ -303,7 +357,7 @@ class npc_shadowmoon_channeler : public CreatureScript
                     CAST_AI(boss_kelidan_the_breaker::boss_kelidan_the_breakerAI, Kelidan->AI())->ChannelerEngaged(who);
                 if (me->IsNonMeleeSpellCasted(false))
                     me->InterruptNonMeleeSpells(true);
-                DoStartMovement(who);
+                StartMuster(who);                       // [lab] muster-then-engage (was DoStartMovement)
             }
 
             void JustDied(Unit* killer) OVERRIDE
