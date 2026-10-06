@@ -134,11 +134,28 @@ namespace Movement {
             spline.initLengths(init);
         }
 
-        /// @todo what to do in such cases? problem is in input data (all points are at same coords)
+        // The accumulated travel-time collapsed to ~0 (degenerate/duplicate control points, or a
+        // path whose endpoint is off the navmesh so Detour returned a degenerate shortcut). The
+        // upstream behavior clamped the duration to 1ms -- which makes the CLIENT teleport the unit
+        // across the real start->end gap: the "ghosting" / invisible-mob server<->client desync we
+        // chased through Blood Furnace, Keli'dan, the squad-vs-flyer snap, and Slave Pens trash.
+        // [lab] Instead, derive a sane duration from the real geometric span so the unit WALKS the
+        // distance at its own speed (no snap). Genuine zero-distance moves still fall back to 1ms.
         if (spline.length() < minimal_duration)
         {
-            SF_LOG_ERROR("misc", "MoveSpline::init_spline: zero length spline, wrong input data?");
-            spline.set_length(spline.last(), spline.isCyclic() ? 1000 : 1);
+            auto const a = spline.getPoint(spline.first());
+            auto const b = spline.getPoint(spline.last());
+            float const dx = b.x - a.x, dy = b.y - a.y, dz = b.z - a.z;
+            float const span = sqrtf(dx * dx + dy * dy + dz * dz);
+            float velocity = args.velocity;
+            if (!(velocity > 0.01f))
+                velocity = 0.01f;
+            int32 dur = (span > 0.1f) ? int32(SecToMS(span / velocity)) : 1;
+            if (dur < 1)
+                dur = 1;
+            if (span > 0.1f)
+                SF_LOG_ERROR("misc", "MoveSpline::init_spline: [lab] degenerate-length spline over %.1fyd -> walking %dms instead of teleporting (suspect off-mesh/degenerate input)", span, dur);
+            spline.set_length(spline.last(), spline.isCyclic() ? 1000 : dur);
         }
         point_Idx = spline.first();
     }
