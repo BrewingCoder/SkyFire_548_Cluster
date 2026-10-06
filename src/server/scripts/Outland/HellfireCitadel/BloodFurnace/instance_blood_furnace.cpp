@@ -364,16 +364,46 @@ class instance_blood_furnace : public InstanceMapScript
                 ResetPrisoner(creature);
             }
 
+            // [lab] True when every prisoner in the cell EXCEPT the one currently dying is dead.
+            // At the OnUnitDeath hook the dying unit still reports IsAlive()==true (its death-state
+            // is applied after the dispatch), so it must be excluded from the check.
+            bool AllPrisonersDead(const std::set<uint64>& prisoners, uint64 dyingGuid)
+            {
+                for (std::set<uint64>::const_iterator i = prisoners.begin(); i != prisoners.end(); ++i)
+                {
+                    if (*i == dyingGuid)
+                        continue;
+                    Creature* prisoner = instance->GetCreature(*i);
+                    if (prisoner && prisoner->IsAlive())
+                        return false;
+                }
+                return true;
+            }
+
             void PrisonerDied(uint64 guid)
             {
-                if (PrisonersCell5.find(guid) != PrisonersCell5.end() && --PrisonerCounter5 <= 0)
-                    ActivateCell(DATA_PRISON_CELL6);
-                else if (PrisonersCell6.find(guid) != PrisonersCell6.end() && --PrisonerCounter6 <= 0)
-                    ActivateCell(DATA_PRISON_CELL7);
-                else if (PrisonersCell7.find(guid) != PrisonersCell7.end() && --PrisonerCounter7 <= 0)
-                    ActivateCell(DATA_PRISON_CELL8);
-                else if (PrisonersCell8.find(guid) != PrisonersCell8.end() && --PrisonerCounter8 <= 0)
-                    ActivateCell(DATA_DOOR5);
+                // [lab] State-based wave advance. The old PrisonerCounterN (seeded by ++ in
+                // StorePrisoner on create, overwritten by ResetPrisons) drifted out of sync -- seeded
+                // higher than the real orc count via a double OnCreatureCreate/respawn or a Broggok
+                // evade-reset on the lever's SetInCombatWithZone -- so it never reached 0 and the next
+                // cell never opened (confirmed in heroic: all 5 cell-5 orcs dead, cell 6 stayed caged).
+                // Checking live alive-state instead is immune to any miscount.
+                if (PrisonersCell5.find(guid) != PrisonersCell5.end())
+                {
+                    if (AllPrisonersDead(PrisonersCell5, guid)) ActivateCell(DATA_PRISON_CELL6);
+                }
+                else if (PrisonersCell6.find(guid) != PrisonersCell6.end())
+                {
+                    if (AllPrisonersDead(PrisonersCell6, guid)) ActivateCell(DATA_PRISON_CELL7);
+                }
+                else if (PrisonersCell7.find(guid) != PrisonersCell7.end())
+                {
+                    if (AllPrisonersDead(PrisonersCell7, guid)) ActivateCell(DATA_PRISON_CELL8);
+                }
+                else if (PrisonersCell8.find(guid) != PrisonersCell8.end())
+                {
+                    if (AllPrisonersDead(PrisonersCell8, guid)) ActivateCell(DATA_DOOR5);
+                }
             }
 
             void ActivateCell(uint8 id)
