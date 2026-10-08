@@ -820,6 +820,7 @@ dtStatus PathGenerator::FindSmoothPath(float const* startPos, float const* endPo
         dtVcopy(iterPos, result);
 
         // Handle end of path and off-mesh links when close enough.
+        bool offMeshHeightFailed = false;
         if (endOfPath && InRangeYZX(iterPos, steerPos, SMOOTH_PATH_SLOP, 1.0f))
         {
             // Reached end of path.
@@ -860,11 +861,14 @@ dtStatus PathGenerator::FindSmoothPath(float const* startPos, float const* endPo
                 }
                 // Move position at the other side of the off-mesh link.
                 dtVcopy(iterPos, endPos);
-                if (dtStatusFailed(_navMeshQuery->getPolyHeight(polys[0], iterPos, &iterPos[1]))) // [lab] TC c602220
-                    return DT_FAILURE;
+                offMeshHeightFailed = dtStatusFailed(_navMeshQuery->getPolyHeight(polys[0], iterPos, &iterPos[1]));
                 iterPos[1] += 0.5f;
             }
         }
+
+        // [lab] TC c602220: unresolved height at the far end of an off-mesh link (checked here to keep nesting shallow)
+        if (offMeshHeightFailed)
+            return DT_FAILURE;
 
         // Store results.
         if (nsmoothPath < maxSmoothPathSize)
