@@ -405,7 +405,8 @@ class boss_kaelthas : public CreatureScript
                             who->RemoveAurasByType(SPELL_AURA_MOD_STEALTH);
                             AttackStart(who);
                         }
-                        else if (me->GetMap()->IsDungeon())
+                        // [lab] IsDungeon() is MAP_DUNGEON only on this core; The Eye is MAP_RAID, so the event never started
+                        else if (me->GetMap()->IsDungeon() || me->GetMap()->IsRaid())
                         {
                             if (instance && !instance->GetData(DATA_KAELTHASEVENT) && !Phase)
                                 StartEvent();
