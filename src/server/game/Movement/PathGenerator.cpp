@@ -12,7 +12,6 @@
 
 #include "DetourCommon.h"
 #include "DetourNavMeshQuery.h"
-#include <cmath> // [lab]
 
 ////////////////// PathGenerator //////////////////
 PathGenerator::PathGenerator(const Unit* owner) :
@@ -795,24 +794,20 @@ dtStatus PathGenerator::FindSmoothPath(float const* startPos, float const* endPo
         dtPolyRef visited[MAX_VISIT_POLY];
 
         uint32 nvisited = 0;
-        // [lab] Both Detour calls below were unchecked. 'result' is uninitialized stack memory and
-        // moveAlongSurface leaves it untouched on failure, so a failed step was stored as a path
-        // point full of stack garbage (caught live: Sethekk Avian Darkhawk patrol, points 10-11 =
-        // (-8.67e15, 35.9, -3.0e21)). That garbage fed MoveSpline (duration INT32_MAX, positions
-        // ~1e12) and produced the ghost / frozen / unhittable mobs. Stop the smooth path at the
-        // last good point instead; BuildPointPath falls back to a shortcut if too little is left.
-        dtStatus moveStatus = _navMeshQuery->moveAlongSurface(polys[0], iterPos, moveTgt, &_filter, result, visited, (int*)&nvisited, MAX_VISIT_POLY);
-        if (dtStatusFailed(moveStatus) || !std::isfinite(result[0]) || !std::isfinite(result[1]) || !std::isfinite(result[2]))
-        {
-            SF_LOG_DEBUG("maps", "++ PathGenerator::FindSmoothPath: moveAlongSurface failed (status 0x%X), truncating smooth path at %u points", moveStatus, nsmoothPath);
-            break;
-        }
+        // [lab] Both Detour calls below were unchecked (TrinityCore fixed this in c602220,
+        // 2019-03-02, "Check the result of some previously ignored Detour calls"; SkyFire's port
+        // predates it). 'result' is uninitialized stack memory and moveAlongSurface leaves it
+        // untouched on failure, so a failed step was stored as a path point full of stack garbage
+        // (caught live: Sethekk Avian Darkhawk patrol, points 10-11 = (-8.67e15, 35.9, -3.0e21)),
+        // which fed MoveSpline INT32_MAX durations and ~1e12 positions -> ghost/frozen mobs.
+        // Fail the smooth path like TC does; BuildPointPath then falls back to a shortcut.
+        if (dtStatusFailed(_navMeshQuery->moveAlongSurface(polys[0], iterPos, moveTgt, &_filter, result, visited, (int*)&nvisited, MAX_VISIT_POLY)))
+            return DT_FAILURE;
         npolys = FixupCorridor(polys, npolys, MAX_PATH_LENGTH, visited, nvisited);
 
-        // keep moveAlongSurface's height if the poly height can't be resolved (npolys may be 0 here)
-        float polyHeight = result[1];
-        if (npolys && dtStatusSucceed(_navMeshQuery->getPolyHeight(polys[0], result, &polyHeight)) && std::isfinite(polyHeight))
-            result[1] = polyHeight;
+        // keep moveAlongSurface's height if the poly height can't be resolved (as TC does today)
+        if (dtStatusFailed(_navMeshQuery->getPolyHeight(polys[0], result, &result[1])))
+            SF_LOG_DEBUG("maps", "++ PathGenerator::FindSmoothPath: cannot find height at (%f, %f, %f)", result[2], result[0], result[1]);
         result[1] += 0.5f;
         dtVcopy(iterPos, result);
 
@@ -857,7 +852,8 @@ dtStatus PathGenerator::FindSmoothPath(float const* startPos, float const* endPo
                 }
                 // Move position at the other side of the off-mesh link.
                 dtVcopy(iterPos, endPos);
-                _navMeshQuery->getPolyHeight(polys[0], iterPos, &iterPos[1]);
+                if (dtStatusFailed(_navMeshQuery->getPolyHeight(polys[0], iterPos, &iterPos[1]))) // [lab] TC c602220
+                    return DT_FAILURE;
                 iterPos[1] += 0.5f;
             }
         }
