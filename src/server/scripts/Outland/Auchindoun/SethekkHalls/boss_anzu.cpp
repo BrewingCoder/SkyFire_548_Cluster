@@ -128,7 +128,10 @@ public:
                         for (uint8 i = 0; i < 7; i++)
                             me->SummonCreature(NPC_BROOD_OF_ANZU, PosSummonBrood[i], TempSummonType::TEMPSUMMON_TIMED_DESPAWN_OUT_OF_COMBAT, 46000);
 
-                        DoCast(me, SPELL_BANISH_SELF);
+                        // [lab] triggered: a plain cast is rejected if Anzu is mid-cast (Paralyzing
+                        // Screech fires 14s into the fight, right when 66% usually lands), which
+                        // silently skipped the first banish while the brood still spawned.
+                        DoCast(me, SPELL_BANISH_SELF, true);
                         events.ScheduleEvent(EVENT_SPELL_BOMB, 12000);
                         break;
                     }
