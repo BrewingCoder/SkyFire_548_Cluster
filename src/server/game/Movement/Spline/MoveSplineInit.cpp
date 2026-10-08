@@ -13,6 +13,8 @@
 #include "WorldPacket.h"
 #include "MotionMaster.h"
 #include "WatchMgr.h"
+#include "GridDefines.h"
+#include "Log.h"
 #include <sstream>
 
 namespace Movement
@@ -71,6 +73,31 @@ namespace Movement
         sWatchMgr->Event(unit, WATCH_CAT_MOVE, ev, ss.str());
     }
 
+    // [lab] Spline-position guard. A unit's in-flight spline can end up evaluating to a garbage
+    // position (seen live: Cobalt Serpents in Heroic Sethekk with ComputePosition().x ~ -5.3e8
+    // while y/z and the unit's real map position were sane). Launch() seeds every NEW spline from
+    // ComputePosition(), so once corrupted the garbage start is copied into each following move
+    // forever: chase splines from x=-5e8 with duration INT32_MAX. The server can't relocate the
+    // unit there (it stays frozen at its last valid spot) while the client is fed nonsense, and
+    // you get a "ghost": visible and targetable but "out of range / not in line of sight" at
+    // point-blank range. Fall back to the unit's real position when the computed one is invalid
+    // or implausibly far from it, which heals the unit on its next move. Logged with the spline
+    // dump so the original corruption can still be traced.
+    static float const SPLINE_POS_MAX_DRIFT = 50.0f;
+    static bool SaneSplinePosition(Unit* unit, Location const& p)
+    {
+        return Skyfire::IsValidMapCoord(p.x, p.y, p.z)
+            && unit->GetExactDist(p.x, p.y, p.z) < SPLINE_POS_MAX_DRIFT;
+    }
+
+    static void RepairSplinePosition(Unit* unit, MoveSpline const& ms, Location& p, char const* where)
+    {
+        SF_LOG_ERROR("misc", "[lab] %s: discarded corrupt spline position (%f, %f, %f) for %s entry %u guid %u at (%f, %f, %f); spline: %s",
+            where, p.x, p.y, p.z, unit->GetTypeId() == TypeID::TYPEID_UNIT ? "creature" : "unit", unit->GetEntry(), unit->GetGUIDLow(),
+            unit->GetPositionX(), unit->GetPositionY(), unit->GetPositionZMinusOffset(), ms.ToString().c_str());
+        p = Location(unit->GetPositionX(), unit->GetPositionY(), unit->GetPositionZMinusOffset(), unit->GetOrientation());
+    }
+
     int32 MoveSplineInit::Launch()
     {
         MoveSpline& move_spline = *unit->movespline;
@@ -89,7 +116,11 @@ namespace Movement
         // this also allows calculate spline position and update map position in much greater intervals
         // Don't compute for transport movement if the unit is in a motion between two transports
         if (!move_spline.Finalized() && move_spline.onTransport == (unit->GetTransGUID() != 0))
+        {
             real_position = move_spline.ComputePosition();
+            if (!unit->GetTransGUID() && !SaneSplinePosition(unit, real_position))
+                RepairSplinePosition(unit, move_spline, real_position, "MoveSplineInit::Launch");
+        }
 
         // should i do the things that user should do? - no.
         if (args.path.empty())
@@ -145,6 +176,8 @@ namespace Movement
             return;
 
         Location loc = move_spline.ComputePosition();
+        if (!unit->GetTransGUID() && !SaneSplinePosition(unit, loc))
+            RepairSplinePosition(unit, move_spline, loc, "MoveSplineInit::Stop");
         args.flags = MoveSplineFlag::Done;
         unit->m_movementInfo.RemoveMovementFlag(MOVEMENTFLAG_FORWARD);
         move_spline.Initialize(args);
