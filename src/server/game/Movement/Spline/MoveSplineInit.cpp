@@ -92,9 +92,16 @@ namespace Movement
 
     static void RepairSplinePosition(Unit* unit, MoveSpline const& ms, Location& p, char const* where)
     {
-        SF_LOG_ERROR("misc", "[lab] %s: discarded corrupt spline position (%f, %f, %f) for %s entry %u guid %u at (%f, %f, %f); spline: %s",
-            where, p.x, p.y, p.z, unit->GetTypeId() == TypeID::TYPEID_UNIT ? "creature" : "unit", unit->GetEntry(), unit->GetGUIDLow(),
-            unit->GetPositionX(), unit->GetPositionY(), unit->GetPositionZMinusOffset(), ms.ToString().c_str());
+        // Invalid coordinates are real corruption. A valid but distant position is usually just a
+        // stale map position (e.g. a patrol whose spline kept advancing while its grid was idle),
+        // so only note that at debug level. Either way, restart from the unit's map position.
+        if (!Skyfire::IsValidMapCoord(p.x, p.y, p.z))
+            SF_LOG_ERROR("misc", "[lab] %s: discarded corrupt spline position (%f, %f, %f) for %s entry %u guid %u at (%f, %f, %f); spline: %s",
+                where, p.x, p.y, p.z, unit->GetTypeId() == TypeID::TYPEID_UNIT ? "creature" : "unit", unit->GetEntry(), unit->GetGUIDLow(),
+                unit->GetPositionX(), unit->GetPositionY(), unit->GetPositionZMinusOffset(), ms.ToString().c_str());
+        else
+            SF_LOG_DEBUG("misc", "[lab] %s: spline position (%f, %f, %f) is %.0fyd from entry %u guid %u map position; restarting from map position",
+                where, p.x, p.y, p.z, unit->GetExactDist(p.x, p.y, p.z), unit->GetEntry(), unit->GetGUIDLow());
         p = Location(unit->GetPositionX(), unit->GetPositionY(), unit->GetPositionZMinusOffset(), unit->GetOrientation());
     }
 

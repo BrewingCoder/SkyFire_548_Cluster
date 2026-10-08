@@ -139,12 +139,36 @@ public:
             }
         }
 
+        // [lab] Player-only target selection. Every targeted Anzu ability is player-targeted in the
+        // 5.4.8 Encounter Journal ("cyclones a player", "claws at a player", "charges a distant
+        // player"); selecting from the threat list without playerOnly picked pets / guardians
+        // (Cyclone 40321 then fails with SPELL_FAILED_TARGET_NOT_PLAYER).
+        Unit* SelectPlayer(float dist = 0.0f)
+        {
+            return SelectTarget(SELECT_TARGET_RANDOM, 0, dist, true);
+        }
+
+        Unit* SelectManaPlayer()
+        {
+            return SelectTarget(SELECT_TARGET_RANDOM, 0, [](Unit* u)
+            {
+                return u->GetTypeId() == TypeID::TYPEID_PLAYER && u->getPowerType() == POWER_MANA;
+            });
+        }
+
         void UpdateAI(uint32 diff) OVERRIDE
         {
-            if (!UpdateVictim())
+            // [lab] Encounter Journal 5253: "While banished, Anzu will continue to use abilities".
+            // UpdateVictim() fails while banished, which used to freeze every timer for the whole
+            // banish; keep running the events then and only skip melee.
+            bool const banished = me->HasAura(SPELL_BANISH_SELF);
+            if (!UpdateVictim() && !banished)
                 return;
 
             events.Update(diff);
+
+            if (me->HasUnitState(UNIT_STATE_CASTING))
+                return;
 
             while (uint32 eventId = events.ExecuteEvent())
             {
@@ -152,13 +176,13 @@ public:
                 {
                     case EVENT_PARALYZING_SCREECH:
                     {
-                        DoCastVictim(SPELL_PARALYZING_SCREECH);
+                        DoCastAOE(SPELL_PARALYZING_SCREECH); // [lab] caster-centred AoE (targets 22/15); works with no victim while banished
                         events.ScheduleEvent(EVENT_PARALYZING_SCREECH, 26000);
                         break;
                     }
                     case EVENT_CYCLONE_OF_FEATHERS:
                     {
-                        if (Unit* target = SelectTarget(SELECT_TARGET_RANDOM, 0))
+                        if (Unit* target = SelectPlayer()) // [lab] players only
                             DoCast(target, SPELL_CYCLONE_OF_FEATHERS);
                         events.ScheduleEvent(EVENT_CYCLONE_OF_FEATHERS, 21000);
                         break;
@@ -176,9 +200,17 @@ public:
                         events.ScheduleEvent(EVENT_SPELL_BOMB, 12000);
                         break;
                     }
-                    case EVENT_FLESH_RIP: // [lab]
+                    case EVENT_FLESH_RIP: // [lab] "claws at a player": current victim if it is a player in melee, else a player in melee
                     {
-                        DoCastVictim(SPELL_FLESH_RIP);
+                        Unit* target = me->GetVictim();
+                        if (!target || target->GetTypeId() != TypeID::TYPEID_PLAYER || !me->IsWithinMeleeRange(target))
+                            target = SelectPlayer(NOMINAL_MELEE_RANGE);
+                        if (!target)
+                        {
+                            events.ScheduleEvent(EVENT_FLESH_RIP, 2000);
+                            break;
+                        }
+                        DoCast(target, SPELL_FLESH_RIP);
                         events.ScheduleEvent(EVENT_FLESH_RIP, std::rand() % 5000 + 15000);
                         break;
                     }
@@ -190,20 +222,19 @@ public:
                             events.ScheduleEvent(EVENT_DIVE, 5000);
                             break;
                         }
-                        if (Unit* target = SelectTarget(SELECT_TARGET_RANDOM, 0, -8.0f, true))
+                        if (Unit* target = SelectPlayer(-8.0f))
                             DoCast(target, SPELL_DIVE);
                         events.ScheduleEvent(EVENT_DIVE, std::rand() % 10000 + 20000);
                         break;
                     }
                     case EVENT_SPELL_BOMB:
                     {
-                        if (Unit* target = SelectTarget(SELECT_TARGET_RANDOM, 0))
+                        // [lab] pick a mana-using player directly (was: any threat target, then silently
+                        // skipped unless it happened to use mana)
+                        if (Unit* target = SelectManaPlayer())
                         {
-                            if (target->getPowerType() == POWER_MANA)
-                            {
-                                DoCast(target, SPELL_SPELL_BOMB);
-                                Talk(SAY_SPELL_BOMB, target);
-                            }
+                            DoCast(target, SPELL_SPELL_BOMB);
+                            Talk(SAY_SPELL_BOMB, target);
                         }
                         break;
                     }
@@ -213,7 +244,8 @@ public:
                 }
             }
 
-            DoMeleeAttackIfReady();
+            if (!banished) // [lab] pacified while banished
+                DoMeleeAttackIfReady();
         }
 
     private:
