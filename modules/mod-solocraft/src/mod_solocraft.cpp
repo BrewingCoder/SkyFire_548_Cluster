@@ -124,8 +124,11 @@ namespace
             return;
 
         Map* map = player->GetMap();
-        if (!map || !map->IsDungeon())
-            return;   // IsDungeon() is true for both 5-man instances and raids
+        // On this core MapEntry::IsDungeon() is MAP_DUNGEON only - raids are MAP_RAID (TrinityCore's
+        // IsDungeon() covers both, which is what this check originally assumed). Checking IsDungeon()
+        // alone silently skipped every raid, so Solocraft.Raids never had any effect.
+        if (!map || !(map->IsDungeon() || map->IsRaid()))
+            return;
 
         bool isRaid = map->IsRaid();
         if (isRaid ? !g_cfg.Raids : !g_cfg.Dungeons)
