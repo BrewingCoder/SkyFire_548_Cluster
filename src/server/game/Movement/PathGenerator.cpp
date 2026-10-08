@@ -12,6 +12,7 @@
 
 #include "DetourCommon.h"
 #include "DetourNavMeshQuery.h"
+#include <cmath> // [lab]
 
 ////////////////// PathGenerator //////////////////
 PathGenerator::PathGenerator(const Unit* owner) :
@@ -439,6 +440,21 @@ void PathGenerator::BuildPointPath(const float* startPoint, const float* endPoin
     for (uint32 i = 0; i < pointCount; ++i)
         _pathPoints[i] = G3D::Vector3(pathPoints[i * VERTEX_SIZE + 2], pathPoints[i * VERTEX_SIZE], pathPoints[i * VERTEX_SIZE + 1]);
 
+    // [lab] Never hand a corrupt point to MoveSpline: one bad vertex poisons the whole spline
+    // (INT32_MAX duration, garbage interpolated positions -> client/server desync). Treat it like
+    // any other Detour failure.
+    for (uint32 i = 0; i < pointCount; ++i)
+    {
+        if (!Skyfire::IsValidMapCoord(_pathPoints[i].x, _pathPoints[i].y, _pathPoints[i].z))
+        {
+            SF_LOG_ERROR("maps", "[lab] PathGenerator::BuildPointPath: invalid point %u/%u (%f, %f, %f) for entry %u guid %u, using shortcut",
+                i, pointCount, _pathPoints[i].x, _pathPoints[i].y, _pathPoints[i].z, _sourceUnit->GetEntry(), _sourceUnit->GetGUIDLow());
+            BuildShortcut();
+            _type = PATHFIND_NOPATH;
+            return;
+        }
+    }
+
     NormalizePath();
 
     // first point is always our current location - we need the next one
@@ -779,10 +795,24 @@ dtStatus PathGenerator::FindSmoothPath(float const* startPos, float const* endPo
         dtPolyRef visited[MAX_VISIT_POLY];
 
         uint32 nvisited = 0;
-        _navMeshQuery->moveAlongSurface(polys[0], iterPos, moveTgt, &_filter, result, visited, (int*)&nvisited, MAX_VISIT_POLY);
+        // [lab] Both Detour calls below were unchecked. 'result' is uninitialized stack memory and
+        // moveAlongSurface leaves it untouched on failure, so a failed step was stored as a path
+        // point full of stack garbage (caught live: Sethekk Avian Darkhawk patrol, points 10-11 =
+        // (-8.67e15, 35.9, -3.0e21)). That garbage fed MoveSpline (duration INT32_MAX, positions
+        // ~1e12) and produced the ghost / frozen / unhittable mobs. Stop the smooth path at the
+        // last good point instead; BuildPointPath falls back to a shortcut if too little is left.
+        dtStatus moveStatus = _navMeshQuery->moveAlongSurface(polys[0], iterPos, moveTgt, &_filter, result, visited, (int*)&nvisited, MAX_VISIT_POLY);
+        if (dtStatusFailed(moveStatus) || !std::isfinite(result[0]) || !std::isfinite(result[1]) || !std::isfinite(result[2]))
+        {
+            SF_LOG_DEBUG("maps", "++ PathGenerator::FindSmoothPath: moveAlongSurface failed (status 0x%X), truncating smooth path at %u points", moveStatus, nsmoothPath);
+            break;
+        }
         npolys = FixupCorridor(polys, npolys, MAX_PATH_LENGTH, visited, nvisited);
 
-        _navMeshQuery->getPolyHeight(polys[0], result, &result[1]);
+        // keep moveAlongSurface's height if the poly height can't be resolved (npolys may be 0 here)
+        float polyHeight = result[1];
+        if (npolys && dtStatusSucceed(_navMeshQuery->getPolyHeight(polys[0], result, &polyHeight)) && std::isfinite(polyHeight))
+            result[1] = polyHeight;
         result[1] += 0.5f;
         dtVcopy(iterPos, result);
 
