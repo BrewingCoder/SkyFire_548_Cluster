@@ -11,6 +11,9 @@
 #include "Unit.h"
 #include "Vehicle.h"
 #include "WorldPacket.h"
+#include "MotionMaster.h"
+#include "WatchMgr.h"
+#include <sstream>
 
 namespace Movement
 {
@@ -41,6 +44,31 @@ namespace Movement
         // Flying creatures use MOVEMENTFLAG_CAN_FLY or MOVEMENTFLAG_DISABLE_GRAVITY
         // Run speed is their default flight speed.
         return MOVE_RUN;
+    }
+
+    // [lab] WatchMgr 'move' category: report every creature spline the server sends to clients,
+    // so a server<->client position desync ("ghost" mobs) can be traced to the exact move that
+    // caused it (chase/jump/home/waypoint, from->to, duration). Cheap early-out when no watch.
+    static void WatchMove(Unit* unit, char const* ev, MoveSplineInitArgs const& args, int32 duration)
+    {
+        if (!sWatchMgr->Active() || unit->GetTypeId() != TypeID::TYPEID_UNIT)
+            return;
+        std::ostringstream ss;
+        ss << ",\"mg\":" << uint32(unit->GetMotionMaster()->GetCurrentMovementGeneratorType())
+           << ",\"dur\":" << duration
+           << ",\"vel\":" << args.velocity
+           << ",\"pts\":" << args.path.size();
+        if (!args.path.empty())
+        {
+            Vector3 const& a = args.path.front();
+            Vector3 const& b = args.path.back();
+            ss << ",\"from\":[" << a.x << "," << a.y << "," << a.z << "]"
+               << ",\"to\":[" << b.x << "," << b.y << "," << b.z << "]";
+        }
+        ss << ",\"parabolic\":" << (args.flags.parabolic ? 1 : 0)
+           << ",\"walk\":" << (args.flags.walkmode ? 1 : 0)
+           << ",\"cyclic\":" << (args.flags.cyclic ? 1 : 0);
+        sWatchMgr->Event(unit, WATCH_CAT_MOVE, ev, ss.str());
     }
 
     int32 MoveSplineInit::Launch()
@@ -92,7 +120,10 @@ namespace Movement
         }
 
         if (!args.Validate(unit))
+        {
+            WatchMove(unit, "MOVE_REJECTED", args, 0);
             return 0;
+        }
 
         unit->m_movementInfo.SetMovementFlags(moveFlags);
         move_spline.Initialize(args);
@@ -101,6 +132,7 @@ namespace Movement
         PacketBuilder::WriteMonsterMove(move_spline, data, unit);
         unit->SendMessageToSet(&data, true);
 
+        WatchMove(unit, "MOVE_LAUNCH", args, move_spline.Duration());
         return move_spline.Duration();
     }
 
@@ -121,6 +153,14 @@ namespace Movement
 
         PacketBuilder::WriteStopMovement(loc, args.splineId, data, unit);
         unit->SendMessageToSet(&data, true);
+
+        if (sWatchMgr->Active() && unit->GetTypeId() == TypeID::TYPEID_UNIT)
+        {
+            std::ostringstream ss;
+            ss << ",\"mg\":" << uint32(unit->GetMotionMaster()->GetCurrentMovementGeneratorType())
+               << ",\"at\":[" << loc.x << "," << loc.y << "," << loc.z << "]";
+            sWatchMgr->Event(unit, WATCH_CAT_MOVE, "MOVE_STOP", ss.str());
+        }
     }
 
     MoveSplineInit::MoveSplineInit(Unit* m) : unit(m)

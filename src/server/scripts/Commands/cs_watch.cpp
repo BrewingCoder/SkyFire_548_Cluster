@@ -8,7 +8,7 @@
 *   watch status                          list active watches
 *
 * radius: yards; 0 (default) = whole map/instance.
-* cats:   csv of go,spawn,death,flags  (default: all)
+* cats:   csv of go,spawn,death,flags,move  (default: all but move; 'all' includes move)
 */
 #include "ScriptMgr.h"
 #include "Chat.h"

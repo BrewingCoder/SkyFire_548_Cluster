@@ -23,6 +23,8 @@ enum WatchCategory
     WATCH_CAT_SPAWN = 0x02, // creature added to world
     WATCH_CAT_DEATH = 0x04, // creature just died
     WATCH_CAT_FLAGS = 0x08, // UNIT_FIELD_FLAGS set/remove
+    WATCH_CAT_MOVE  = 0x10, // creature movement splines sent to clients (launch/stop/rejected) - noisy, opt-in
+    WATCH_CAT_DEFAULT = 0x0F, // what an omitted cats arg means (everything except the noisy 'move')
     WATCH_CAT_ALL   = 0xFF
 };
 
@@ -45,7 +47,7 @@ public:
     void Event(WorldObject const* subject, uint32 cat, char const* ev, std::string const& extraJson = "");
 
     static std::string DecodeUnitFlags(uint32 mask);
-    static uint32 ParseCategories(std::string const& csv); // "go,spawn,flags" -> mask; "all"/"" -> ALL
+    static uint32 ParseCategories(std::string const& csv); // "go,spawn,move" -> mask; "" -> DEFAULT; "all" -> ALL
 
 private:
     WatchMgr() { }
