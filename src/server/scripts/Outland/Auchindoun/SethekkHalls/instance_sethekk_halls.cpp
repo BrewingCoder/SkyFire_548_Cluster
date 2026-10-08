@@ -28,13 +28,11 @@ class instance_sethekk_halls : public InstanceMapScript
 
             void OnCreatureCreate(Creature* creature) OVERRIDE
             {
-                if (creature->GetEntry() == NPC_ANZU)
-                {
-                    if (GetBossState(DATA_ANZU) == DONE)
-                        creature->DisappearAndDie();
-                    else
-                        SetBossState(DATA_ANZU, IN_PROGRESS);
-                }
+                // [lab] Anzu is a permanent heroic spawn since 4.0.1, not summoned: spawning must not start the
+                // encounter. BossAI moves it to IN_PROGRESS on pull (_EnterCombat), NOT_STARTED on reset/evade
+                // (_Reset) and DONE on death (_JustDied); a completed instance keeps him gone.
+                if (creature->GetEntry() == NPC_ANZU && GetBossState(DATA_ANZU) == DONE)
+                    creature->DisappearAndDie();
             }
 
             void OnGameObjectCreate(GameObject* go) OVERRIDE
