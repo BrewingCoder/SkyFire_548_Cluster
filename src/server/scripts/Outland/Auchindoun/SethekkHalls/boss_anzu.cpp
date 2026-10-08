@@ -83,14 +83,16 @@ public:
 
         void DamageTaken(Unit* /*killer*/, uint32& damage) OVERRIDE
         {
-            if (me->HealthBelowPctDamaged(33, damage) && !_under33Percent)
+            // [lab] retail thresholds are 75% and 35% ("When Anzu reaches 75% and 35% remaining
+            // health, he banishes himself"), not 66/33. Flag names kept to keep the diff small.
+            if (me->HealthBelowPctDamaged(35, damage) && !_under33Percent)
             {
                 _under33Percent = true;
                 Talk(SAY_SUMMON_BROOD);
                 events.ScheduleEvent(EVENT_SUMMON, 3000);
             }
 
-            if (me->HealthBelowPctDamaged(66, damage) && !_under66Percent)
+            if (me->HealthBelowPctDamaged(75, damage) && !_under66Percent)
             {
                 _under66Percent = true;
                 Talk(SAY_SUMMON_BROOD);
