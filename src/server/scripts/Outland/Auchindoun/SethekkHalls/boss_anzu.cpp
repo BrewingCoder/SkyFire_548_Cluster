@@ -69,7 +69,9 @@ public:
 
         void Reset() OVERRIDE
         {
-            //_Reset();
+            // [lab] restore BossAI reset now that Anzu is a permanent spawn: boss state NOT_STARTED,
+            // brood despawned, events cleared on spawn and on every wipe/evade.
+            _Reset();
             events.Reset();
             _under33Percent = false;
             _under66Percent = false;
