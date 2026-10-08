@@ -129,16 +129,27 @@ namespace
 
         bool isRaid = map->IsRaid();
         if (isRaid ? !g_cfg.Raids : !g_cfg.Dungeons)
+        {
+            SF_LOG_INFO("misc", "[Solocraft] %s: no scaling on map %u (%s disabled in config)", player->GetName().c_str(), map->GetId(), isRaid ? "raids" : "dungeons");
             return;
+        }
 
         InstanceMap* im = map->ToInstanceMap();
         if (!im)
+        {
+            SF_LOG_INFO("misc", "[Solocraft] %s: no scaling on map %u (not an InstanceMap)", player->GetName().c_str(), map->GetId());
             return;
+        }
 
         uint32 maxPlayers = im->GetMaxPlayers();
         uint32 actual = map->GetPlayersCountExceptGMs();
         if (maxPlayers <= 1 || actual < 1 || actual >= maxPlayers)
-            return;   // full group (or unknown) -> no scaling needed
+        {
+            // full group (or unknown) -> no scaling needed; logged so a silent no-op is diagnosable
+            SF_LOG_INFO("misc", "[Solocraft] %s: no scaling on map %u instance %u difficulty %u (maxPlayers=%u, players=%u)",
+                player->GetName().c_str(), map->GetId(), map->GetInstanceId(), uint32(map->GetDifficulty()), maxPlayers, actual);
+            return;
+        }
 
         float scale = float(maxPlayers) / float(actual);
         float mult = 1.0f + (scale - 1.0f) * g_cfg.Balance;
@@ -169,6 +180,9 @@ namespace
 
         if (g_cfg.ScaleHealth)
             player->SetFullHealth();
+
+        SF_LOG_INFO("misc", "[Solocraft] %s: scaled x%.1f (health x%.1f) on map %u instance %u difficulty %u (%u/%u players)",
+            player->GetName().c_str(), mult, healthMult, map->GetId(), map->GetInstanceId(), uint32(map->GetDifficulty()), actual, maxPlayers);
 
         if (g_cfg.Announce && player->GetSession())
             ChatHandler(player->GetSession()).PSendSysMessage(
@@ -250,13 +264,13 @@ public:
     {
         static std::vector<ChatCommand> sub =
         {
-            { "status", rbac::RBAC_PERM_COMMAND_SERVER_INFO, false, &HandleStatus, "", },
+            { "status", rbac::RBAC_PERM_COMMAND_SERVER_INFO, true,  &HandleStatus, "", },
             { "on",     rbac::RBAC_PERM_COMMAND_SERVER_SET,  true,  &HandleOn,     "", },
             { "off",    rbac::RBAC_PERM_COMMAND_SERVER_SET,  true,  &HandleOff,    "", },
         };
         static std::vector<ChatCommand> tbl =
         {
-            { "solocraft", rbac::RBAC_PERM_COMMAND_SERVER_INFO, false, NULL, "", sub },
+            { "solocraft", rbac::RBAC_PERM_COMMAND_SERVER_INFO, true,  NULL, "", sub },
         };
         return tbl;
     }
