@@ -30,6 +30,7 @@ char const* WatchMgr::CatLabel(uint32 catBit)
         case WATCH_CAT_DEATH: return "death";
         case WATCH_CAT_FLAGS: return "flags";
         case WATCH_CAT_MOVE:  return "move";
+        case WATCH_CAT_CAST:  return "cast";
         default:              return "?";
     }
 }
@@ -51,6 +52,7 @@ uint32 WatchMgr::ParseCategories(std::string const& csv)
         else if (tok == "death") mask |= WATCH_CAT_DEATH;
         else if (tok == "flags") mask |= WATCH_CAT_FLAGS;
         else if (tok == "move")  mask |= WATCH_CAT_MOVE;
+        else if (tok == "cast")  mask |= WATCH_CAT_CAST;
     }
     return mask ? mask : WATCH_CAT_DEFAULT;
 }

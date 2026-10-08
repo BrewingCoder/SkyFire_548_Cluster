@@ -24,6 +24,7 @@ enum WatchCategory
     WATCH_CAT_DEATH = 0x04, // creature just died
     WATCH_CAT_FLAGS = 0x08, // UNIT_FIELD_FLAGS set/remove
     WATCH_CAT_MOVE  = 0x10, // creature movement splines sent to clients (launch/stop/rejected) - noisy, opt-in
+    WATCH_CAT_CAST  = 0x20, // creature spell casts: start (with cast time) / failed (with SpellCastResult) - opt-in
     WATCH_CAT_DEFAULT = 0x0F, // what an omitted cats arg means (everything except the noisy 'move')
     WATCH_CAT_ALL   = 0xFF
 };

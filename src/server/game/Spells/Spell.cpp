@@ -49,6 +49,8 @@
 #include "World.h"
 #include "WorldPacket.h"
 #include "WorldSession.h"
+#include "WatchMgr.h" // [lab]
+#include <sstream> // [lab]
 
 extern pEffect SpellEffects[TOTAL_SPELL_EFFECTS];
 
@@ -2964,6 +2966,21 @@ bool Spell::UpdateChanneledTargetList()
     return channelTargetEffectMask == 0;
 }
 
+// [lab] WatchMgr 'cast' category: creature spell casts (start / failed with reason) near a
+// watched player, so encounter timers and silently-rejected casts can be read off the log.
+static void WatchCast(Unit* caster, char const* ev, SpellInfo const* info, Unit* target, int32 castTime, int32 result)
+{
+    if (!sWatchMgr->Active() || !caster || caster->GetTypeId() != TypeID::TYPEID_UNIT)
+        return;
+    std::ostringstream ss;
+    ss << ",\"spell\":" << info->Id << ",\"castMs\":" << castTime;
+    if (result >= 0)
+        ss << ",\"result\":" << result;
+    if (target)
+        ss << ",\"tgtEntry\":" << target->GetEntry() << ",\"tgtGuid\":" << target->GetGUIDLow();
+    sWatchMgr->Event(caster, WATCH_CAT_CAST, ev, ss.str());
+}
+
 void Spell::prepare(SpellCastTargets const* targets, AuraEffect const* triggeredByAura)
 {
     if (m_CastItem)
@@ -3174,6 +3191,7 @@ void Spell::prepare(SpellCastTargets const* targets, AuraEffect const* triggered
         }
 
         SendCastResult(result);
+        WatchCast(m_caster, "CAST_FAILED", m_spellInfo, m_targets.GetUnitTarget(), 0, int32(result)); // [lab]
 
         finish(false);
         return;
@@ -3210,6 +3228,7 @@ void Spell::prepare(SpellCastTargets const* targets, AuraEffect const* triggered
 
     // set timer base at cast time
     ReSetTimer();
+    WatchCast(m_caster, "CAST_START", m_spellInfo, m_targets.GetUnitTarget(), m_casttime, -1); // [lab]
 
     SF_LOG_DEBUG("spells", "Spell::prepare: spell id %u source %u caster %d customCastFlags %u mask %u", m_spellInfo->Id, m_caster->GetEntry(), m_originalCaster ? m_originalCaster->GetEntry() : -1, _triggeredCastFlags, m_targets.GetTargetMask());
 
