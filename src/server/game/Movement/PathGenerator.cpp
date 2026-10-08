@@ -439,25 +439,28 @@ void PathGenerator::BuildPointPath(const float* startPoint, const float* endPoin
     for (uint32 i = 0; i < pointCount; ++i)
         _pathPoints[i] = G3D::Vector3(pathPoints[i * VERTEX_SIZE + 2], pathPoints[i * VERTEX_SIZE], pathPoints[i * VERTEX_SIZE + 1]);
 
-    // [lab] Never hand a corrupt point to MoveSpline: one bad vertex poisons the whole spline
+    NormalizePath();
+
+    // [lab] Validate the FINAL path (after NormalizePath/DensifyGroundPath, which add points).
+    // Never hand a corrupt point to MoveSpline: one bad vertex poisons the whole spline
     // (INT32_MAX duration, garbage interpolated positions -> client/server desync). Treat it like
     // any other Detour failure.
-    for (uint32 i = 0; i < pointCount; ++i)
+    for (uint32 i = 0; i < _pathPoints.size(); ++i)
     {
         if (!Skyfire::IsValidMapCoord(_pathPoints[i].x, _pathPoints[i].y, _pathPoints[i].z))
         {
             SF_LOG_ERROR("maps", "[lab] PathGenerator::BuildPointPath: invalid point %u/%u (%f, %f, %f) for entry %u guid %u, using shortcut",
-                i, pointCount, _pathPoints[i].x, _pathPoints[i].y, _pathPoints[i].z, _sourceUnit->GetEntry(), _sourceUnit->GetGUIDLow());
+                i, uint32(_pathPoints.size()), _pathPoints[i].x, _pathPoints[i].y, _pathPoints[i].z, _sourceUnit->GetEntry(), _sourceUnit->GetGUIDLow());
             BuildShortcut();
             _type = PATHFIND_NOPATH;
             return;
         }
     }
 
-    NormalizePath();
-
     // first point is always our current location - we need the next one
-    SetActualEndPosition(_pathPoints[pointCount - 1]);
+    // [lab] _pathPoints.back(), not [pointCount - 1]: DensifyGroundPath (in NormalizePath) adds points,
+    // so pointCount - 1 is an intermediate point, not the end of the path.
+    SetActualEndPosition(_pathPoints.back());
 
     // force the given destination, if needed
     if (_forceDestination &&
@@ -527,7 +530,12 @@ void PathGenerator::DensifyGroundPath()
             continue;
         }
 
-        G3D::Vector3 const& prev = densified.back();
+        // [lab] Copy, don't reference: emplace_back below can reallocate 'densified' (reserve(size*4)
+        // is exceeded by a long 2-point leg, e.g. a ~45yd waypoint leg needs ~11 points), leaving a
+        // reference to freed memory - every following point was then built from garbage
+        // (Sethekk Avian Darkhawk: points 10-11 = (-8.67e15, 35.9, -3.0e21), spline duration
+        // INT32_MAX -> ghost / untargetable / "not in line of sight" mobs).
+        G3D::Vector3 const prev = densified.back();
         G3D::Vector3 const& next = _pathPoints[i];
         float const dx = next.x - prev.x;
         float const dy = next.y - prev.y;
