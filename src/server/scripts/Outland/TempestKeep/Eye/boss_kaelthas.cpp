@@ -66,7 +66,7 @@ enum Spells
     SPELL_RES_VISUAL                    = 24171,
 
     // Phase 4 spells
-    SPELL_FIREBALL                      = 22088,           //wrong but works with CastCustomSpell
+    SPELL_FIREBALL                      = 36805,           // [lab] was 22088 + CastCustomSpell (level-scaled to 1.35M)
     SPELL_PYROBLAST                     = 36819,
     SPELL_FLAME_STRIKE                  = 36735,
     SPELL_FLAME_STRIKE_VIS              = 36730,
@@ -741,8 +741,10 @@ class boss_kaelthas : public CreatureScript
                                     {
                                         //interruptable
                                         me->ApplySpellImmune(0, IMMUNITY_EFFECT, SPELL_EFFECT_INTERRUPT_CAST, false);
-                                        int32 dmg = 20000+rand()%5000;
-                                        me->CastCustomSpell(me->GetVictim(), SPELL_FIREBALL, &dmg, 0, 0, false);
+                                        // [lab] Kael's own Fireball (36805: 18000-22000 Fire, no level scaling).
+                                        // Custom basepoints on the level-20 generic 22088 went through the NPC
+                                        // level-damage formula (x86 at level 73) -> 1.35M hits.
+                                        DoCastVictim(SPELL_FIREBALL);
                                         IsCastingFireball = true;
                                         Fireball_Timer = 2500;
                                     }
