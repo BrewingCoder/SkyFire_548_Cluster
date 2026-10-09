@@ -15,6 +15,9 @@ EndScriptData */
 #include "the_eye.h"
 #include "WorldPacket.h"
 #include "Opcodes.h"
+#include "CellImpl.h"
+#include "GridNotifiers.h"
+#include "GridNotifiersImpl.h"
 
 enum Yells
 {
@@ -191,8 +194,10 @@ struct advisorbase_ai : public ScriptedAI
         ScriptedAI::AttackStart(who);
     }
 
-    void Revive(Unit* /*Target*/)
+    void Revive(Unit* Target)
     {
+        // [lab] DelayRes_Target was never set, so the revived advisor had no one to attack and idled until aggroed
+        DelayRes_Target = Target ? Target->GetGUID() : 0;
         me->RemoveFlag(UNIT_FIELD_FLAGS, UNIT_FLAG_NOT_SELECTABLE);
         // double health for phase 3
         me->SetMaxHealth(me->GetMaxHealth() * 2);
@@ -254,10 +259,15 @@ struct advisorbase_ai : public ScriptedAI
                     Target = me->GetVictim();
 
                 DoResetThreat();
-                AttackStart(Target);
-                me->GetMotionMaster()->Clear();
-                me->GetMotionMaster()->MoveChase(Target);
-                me->AddThreat(Target, 0.0f);
+                if (Target)
+                {
+                    AttackStart(Target);
+                    me->GetMotionMaster()->Clear();
+                    me->GetMotionMaster()->MoveChase(Target);
+                    me->AddThreat(Target, 0.0f);
+                }
+                // [lab] revived advisors engage the whole raid, not just whoever wanders into aggro range
+                DoZoneInCombat();
             } else DelayRes_Timer -= diff;
         }
     }
@@ -325,7 +335,7 @@ class boss_kaelthas : public CreatureScript
                 if (me->IsInCombat())
                     PrepareAdvisors();
 
-                summons.DespawnAll();
+                DespawnEncounterSummons();
 
                 me->RemoveFlag(UNIT_FIELD_FLAGS, UNIT_FLAG_NOT_SELECTABLE);
                 me->SetFlag(UNIT_FIELD_FLAGS, UNIT_FLAG_NON_ATTACKABLE);
@@ -436,8 +446,40 @@ class boss_kaelthas : public CreatureScript
                 {
                     if (Unit* target = SelectTarget(SELECT_TARGET_RANDOM, 0))
                         summoned->AI()->AttackStart(target);
+                }
 
-                    summons.Summon(summoned);
+                // [lab] track phoenixes too, or they outlive a wipe
+                summons.Summon(summoned);
+            }
+
+            // [lab] Despawn everything the encounter summoned: Kael's own list, plus summons owned by the advisors or
+            // by Kael's summons (phoenix -> egg -> phoenix, Flame Strike triggers, Telonicus' remote toy), which
+            // never reach Kael's SummonList and were left roaming the chamber after a wipe.
+            void DespawnEncounterSummons()
+            {
+                summons.DespawnAll();
+
+                std::list<Creature*> nearby;
+                Skyfire::AnyUnitInObjectRangeCheck check(me, 200.0f);
+                Skyfire::CreatureListSearcher<Skyfire::AnyUnitInObjectRangeCheck> searcher(me, nearby, check);
+                me->VisitNearbyGridObject(200.0f, searcher);
+
+                for (Creature* creature : nearby)
+                {
+                    uint32 entry = creature->GetEntry();
+                    bool owned = entry == NPC_PHOENIX || entry == NPC_PHOENIX_EGG;
+
+                    if (!owned)
+                        if (TempSummon* summon = creature->ToTempSummon())
+                        {
+                            uint64 summoner = summon->GetSummonerGUID();
+                            owned = summoner && summoner == me->GetGUID();
+                            for (uint8 i = 0; i < MAX_ADVISORS && summoner && !owned; ++i)
+                                owned = summoner == m_auiAdvisorGuid[i];
+                        }
+
+                    if (owned)
+                        creature->DespawnOrUnsummon();
                 }
             }
 
@@ -453,7 +495,7 @@ class boss_kaelthas : public CreatureScript
 
                 Talk(SAY_DEATH);
 
-                summons.DespawnAll();
+                DespawnEncounterSummons();
 
                 if (instance)
                     instance->SetData(DATA_KAELTHASEVENT, 0);
@@ -681,7 +723,9 @@ class boss_kaelthas : public CreatureScript
                         if (PhaseSubphase == 0)
                         {
                             //Respawn advisors
-                            Unit* target = SelectTarget(SELECT_TARGET_RANDOM, 0);
+                            Unit* target = SelectTarget(SELECT_TARGET_RANDOM, 0, 0.0f, true);
+                            if (!target)
+                                target = SelectTarget(SELECT_TARGET_RANDOM, 0);
 
                             Creature* Advisor;
                             for (uint8 i = 0; i < MAX_ADVISORS; ++i)
@@ -771,7 +815,8 @@ class boss_kaelthas : public CreatureScript
 
                             if (FlameStrike_Timer <= diff)
                             {
-                                if (Unit* unit = SelectTarget(SELECT_TARGET_RANDOM, 0))
+                                // [lab] players only: 36735 fails TARGET_NOT_PLAYER on pets/guardians
+                                if (Unit* unit = SelectTarget(SELECT_TARGET_RANDOM, 0, 200.0f, true))
                                     DoCast(unit, SPELL_FLAME_STRIKE);
 
                                 FlameStrike_Timer = 30000;
@@ -1062,7 +1107,8 @@ public:
             //Gaze_Timer
             if (Gaze_Timer <= diff)
             {
-                if (Unit* target = SelectTarget(SELECT_TARGET_RANDOM, 0))
+                // [lab] Gaze fixates a player, never a pet/guardian
+                if (Unit* target = SelectTarget(SELECT_TARGET_RANDOM, 0, 100.0f, true))
                 {
                     DoResetThreat();
                     me->AddThreat(target, 5000000.0f);
@@ -1375,7 +1421,8 @@ public:
             //RemoteToy_Timer
             if (RemoteToy_Timer <= diff)
             {
-                if (Unit* target = SelectTarget(SELECT_TARGET_RANDOM, 0))
+                // [lab] players only, and not one who already carries the toy (its aura lasts 60s)
+                if (Unit* target = SelectTarget(SELECT_TARGET_RANDOM, 0, 0.0f, true, -int32(SPELL_REMOTE_TOY)))
                     DoCast(target, SPELL_REMOTE_TOY);
 
                 RemoteToy_Timer = 10000+rand()%5000;
