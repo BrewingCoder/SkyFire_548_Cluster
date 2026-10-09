@@ -1,0 +1,40 @@
+diff --git a/src/server/game/Entities/Creature/Creature.cpp b/src/server/game/Entities/Creature/Creature.cpp
+index eb49f953e6..b363954f4f 100644
+--- a/src/server/game/Entities/Creature/Creature.cpp
++++ b/src/server/game/Entities/Creature/Creature.cpp
+@@ -8,6 +8,7 @@
+ #include "BattlePetSpawnMgr.h"
+ #include "CellImpl.h"
+ #include "Common.h"
++#include "Config.h"
+ #include "Creature.h"
+ #include "CreatureAI.h"
+ #include "CreatureAISelector.h"
+@@ -1453,6 +1454,12 @@ void Creature::setDeathState(DeathState s)
+     if (s == DeathState::JUST_DIED)
+     {
+         m_corpseRemoveTime = time(NULL) + m_corpseDelay;
++        // mod-solocraft InstanceCorpsePersist: keep mob corpses (and their loot) in instances
++        // until the instance resets, so a solo player can run back after a death or clear a
++        // room before looting it. Covers every kill, including pet/guardian killing blows.
++        if (GetMap() && GetMap()->Instanceable() &&
++            sConfigMgr->GetBoolDefault("Solocraft.InstanceCorpsePersist", false))
++            m_corpseRemoveTime = time(NULL) + WEEK;
+         m_respawnTime = time(NULL) + m_respawnDelay + m_corpseDelay;
+ 
+         // always save boss respawn time at death to prevent crash cheating
+@@ -2270,6 +2277,14 @@ void Creature::GetRespawnPosition(float& x, float& y, float& z, float* ori, floa
+ 
+ void Creature::AllLootRemovedFromCorpse()
+ {
++    // mod-solocraft InstanceCorpsePersist: the looted-decay logic below subtracts the
++    // (now ~WEEK) remaining corpse time from BOTH m_corpseRemoveTime and m_respawnTime,
++    // which would remove the corpse and respawn the mob the instant it is looted. Skip it
++    // in instances so looted corpses persist and mobs stay dead until the instance resets.
++    if (GetMap() && GetMap()->Instanceable() &&
++        sConfigMgr->GetBoolDefault("Solocraft.InstanceCorpsePersist", false))
++        return;
++
+     if (!HasFlag(UNIT_FIELD_FLAGS, UNIT_FLAG_SKINNABLE))
+     {
+         time_t now = time(NULL);

@@ -1,0 +1,17 @@
+diff --git a/src/server/game/Entities/Player/Player.cpp b/src/server/game/Entities/Player/Player.cpp
+index 4bf645add6..7f010e8cff 100644
+--- a/src/server/game/Entities/Player/Player.cpp
++++ b/src/server/game/Entities/Player/Player.cpp
+@@ -5588,6 +5588,12 @@ void Player::DurabilityPointsLossAll(int32 points, bool inventory)
+ 
+ void Player::DurabilityPointsLoss(Item* item, int32 points)
+ {
++    // mod-solocraft PreventDurabilityLoss: optional QoL for solo/family play where clearing
++    // hard content means dying a lot. All Durability*Loss* paths funnel through here, so this
++    // single gate cancels durability loss server-wide (death, block-breaks, etc.).
++    if (sConfigMgr->GetBoolDefault("Solocraft.PreventDurabilityLoss", false))
++        return;
++
+     int32 pMaxDurability = item->GetUInt32Value(ITEM_FIELD_MAX_DURABILITY);
+     int32 pOldDurability = item->GetUInt32Value(ITEM_FIELD_DURABILITY);
+     int32 pNewDurability = pOldDurability - points;

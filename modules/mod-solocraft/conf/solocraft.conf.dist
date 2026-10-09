@@ -1,85 +1,166 @@
 [worldserver]
 
-########################################
-# mod-solocraft configuration
+###############################################################################
+# mod-solocraft configuration (SkyFire 5.4.8 / MoP build 18414)
 #
-# Scales a player's stats up when they enter an instance under-manned, so a
-# solo player / small group can clear content built for a full group.
-#   buff multiplier = 1 + (maxPlayers/actualPlayers - 1) * Balance   (capped)
-# Applied on entering a dungeon/raid, removed on leaving.
-########################################
+# Scales a player up while they are in an instance with fewer players than the
+# instance was built for, so a solo player or small group can clear content
+# designed for a full group. Scaling is worked out when a player enters a map
+# or logs in, and removed when they leave the instance or log out. It is not
+# recalculated mid-instance if more players join; re-enter to update it.
 #
-#    Solocraft.Enable        Master switch. Default 0 (off).
-#    Solocraft.Dungeons      Scale 5-man dungeons. Default 1.
-#    Solocraft.Raids         Scale raids. Default 1.
-#    Solocraft.Balance       Fraction of full linear scaling to apply (0..1+).
-#                            1.0 = full (25-man solo -> ~25x); lower = gentler.
-#                            Default 0.6.
-#    Solocraft.MaxMultiplier Hard cap on the stat multiplier. Default 10.0.
-#    Solocraft.MinLevel      Don't scale below this level. Default 1.
-#    Solocraft.ScaleHealth   Also scale max health (and heal to full on apply).
-#                            Default 1.
-#    Solocraft.Announce      Whisper the player their scaling on entry. Default 1.
-#    Solocraft.HealthMultiplier
-#                            EXTRA multiplier applied to max health ON TOP of the
-#                            core multiplier. Primary stats stay at the core
-#                            multiplier; only health is boosted further, e.g.
-#                            core x5 with 1.5 here => health x7.5. Gives a solo
-#                            player a longer survival window without inflating
-#                            damage output (work the mechanics, live longer).
-#                            1.0 = no extra health. Requires ScaleHealth=1.
-#                            Default 1.0.
-#    Solocraft.ArmorMultiplier
-#                            Flat armor multiplier applied while scaled (physical
-#                            damage mitigation). Smooth, no RNG, no buff icon;
-#                            applied/removed with the rest of the scaling. Does
-#                            nothing vs magic. 1.0 = off. Default 1.0.
-#    Solocraft.DamageMultiplier
-#                            Scales the WEAPON-DAMAGE term while scaled. A weapon
-#                            class's DPS comes mostly from weapon damage (an item
-#                            property that primary-stat scaling never touches), so
-#                            without this a x5 stat boost barely moves melee/ranged
-#                            damage. Weapon damage is scaled at (group_mult x this),
-#                            so 1.0 = weapon damage scales with the group size
-#                            (recommended), >1 adds extra. Affects melee/ranged only
-#                            (not spell/pet damage). Default 1.0.
-#    Solocraft.InstanceCorpsePersist
-#                            Keep killed mob corpses (and their loot) in an
-#                            instance until the instance resets, instead of the
-#                            normal ~60s decay - so you can run back after a
-#                            death and still loot, or clear a big room before
-#                            looting it. Looted corpses still decay normally.
-#                            Applies to direct player kills. Default 1.
-#    Solocraft.PreventDurabilityLoss
-#                            Disable ALL durability loss server-wide (death,
-#                            block-breaks, etc.). QoL for solo/family play where
-#                            clearing hard content means dying a lot, so you're
-#                            not constantly repairing. Enforced by a core gate in
-#                            Player::DurabilityPointsLoss. Default 0.
-#    Solocraft.UseAura       Apply the scaling aura (carrier spell 32172, effects
-#                            overridden in DB) while scaled. It carries an all-school
-#                            damage-TAKEN reduction (mitigation that also covers
-#                            physical, which armor alone can't) and a spell/disease
-#                            damage-DONE boost scaled with the group multiplier (for
-#                            casters / Unholy DKs / diseases; physical melee is scaled
-#                            by the weapon-damage multiplier instead). Default 1.
-#    Solocraft.DamageTakenReduction
-#                            % of ALL incoming damage removed by the aura while scaled
-#                            (0..95). The main survivability lever for soloing content
-#                            tuned for a full group. Requires UseAura=1. Default 0.
+#   scale      = maxPlayers / playersInInstance        (GMs are not counted)
+#   multiplier = 1 + (scale - 1) * Solocraft.Balance   (capped at MaxMultiplier)
+#
+#   e.g. solo in a 5-man, Balance 0.6  -> 1 + (5 - 1) * 0.6   = x3.4
+#        solo in a 25-man, Balance 1.0 -> 1 + (25 - 1) * 1.0  = x25 -> capped x10
+#
+# NOTE: the SkyFire module loader stages this file next to worldserver.conf but
+# the core does not read it on its own. Copy the keys you want into
+# worldserver.conf (or your config overrides). Defaults below apply when a key
+# is missing.
+#
+# Keys marked [core patch] only take effect if you applied the matching patch
+# from this module's patches/ directory. Without the patch they are ignored
+# (the module just reports them in .solocraft status).
+###############################################################################
+
+###############################################################################
+# GENERAL
+#
+#    Solocraft.Enable
+#        Description: Master switch. Can also be toggled at runtime with
+#                     .solocraft on / .solocraft off (not persisted).
+#        Default:     0 - (Disabled)
+#                     1 - (Enabled)
+#
+#    Solocraft.Dungeons
+#        Description: Scale players in 5-man dungeons (MAP_DUNGEON).
+#        Default:     1
+#
+#    Solocraft.Raids
+#        Description: Scale players in raids (MAP_RAID), including legacy
+#                     raids and every MoP raid size/difficulty.
+#        Default:     1
+#
+#    Solocraft.MinLevel
+#        Description: Players below this level are never scaled.
+#        Default:     1
+#
+#    Solocraft.Announce
+#        Description: Send the player a system message with their multiplier
+#                     when scaling is applied.
+#        Default:     1
 
 Solocraft.Enable = 0
 Solocraft.Dungeons = 1
 Solocraft.Raids = 1
+Solocraft.MinLevel = 1
+Solocraft.Announce = 1
+
+###############################################################################
+# SCALING STRENGTH
+#
+#    Solocraft.Balance
+#        Description: Fraction of full linear scaling to apply (0.0 and up).
+#                     1.0 = a solo player gets the full group-equivalent
+#                     multiplier (solo 5-man -> x5). Lower = gentler.
+#        Default:     0.6
+#
+#    Solocraft.MaxMultiplier
+#        Description: Hard cap on the multiplier (minimum 1.0). Mostly matters
+#                     for raids, where maxPlayers/1 gets large.
+#        Default:     10.0
+
 Solocraft.Balance = 0.6
 Solocraft.MaxMultiplier = 10.0
-Solocraft.MinLevel = 1
+
+###############################################################################
+# WHAT GETS SCALED
+#
+# The multiplier is applied to the five primary stats (Strength, Agility,
+# Stamina, Intellect, Spirit) as a TOTAL_PCT unit modifier, so attack power,
+# spell power and health follow through the normal stat formulas. The options
+# below add or adjust specific terms on top of that.
+#
+#    Solocraft.ScaleHealth
+#        Description: Also scale max health directly, and heal the player to
+#                     full when scaling is applied.
+#        Default:     1
+#
+#    Solocraft.HealthMultiplier
+#        Description: EXTRA health multiplier stacked on top of the core
+#                     multiplier (minimum 0.1). Primary stats - and therefore
+#                     damage - stay at the core multiplier. Example: core x5
+#                     with 1.5 here gives stats x5, health x7.5. Gives a solo
+#                     player a longer window to play the mechanics without
+#                     inflating damage. Requires ScaleHealth = 1.
+#                     Note: Stamina is already scaled, so health grows from
+#                     both terms; start at 1.0 and raise only if needed.
+#        Default:     1.0 - (No extra health)
+#
+#    Solocraft.ArmorMultiplier
+#        Description: Flat armor multiplier while scaled (minimum 0.1).
+#                     Physical mitigation only; does nothing against magic.
+#        Default:     1.0 - (Off)
+#
+#    Solocraft.DamageMultiplier
+#        Description: Scales the WEAPON-DAMAGE term (main hand, off hand,
+#                     ranged) while scaled. Melee/ranged DPS comes mostly from
+#                     weapon damage, an item property that primary-stat scaling
+#                     never touches, so without this a x5 stat boost barely
+#                     moves physical damage. Weapon damage is scaled by
+#                     (multiplier x this value): 1.0 = weapon damage scales
+#                     with group size (recommended); > 1.0 adds extra.
+#                     Does not affect spell or pet damage. Minimum 0.1.
+#        Default:     1.0
+
 Solocraft.ScaleHealth = 1
-Solocraft.Announce = 1
 Solocraft.HealthMultiplier = 1.0
 Solocraft.ArmorMultiplier = 1.0
 Solocraft.DamageMultiplier = 1.0
-Solocraft.InstanceCorpsePersist = 1
-Solocraft.PreventDurabilityLoss = 0
+
+###############################################################################
+# INCOMING DAMAGE REDUCTION
+#
+# Applied per hit in a UnitScript::OnDamage hook, which every damage source
+# passes through (melee, spells, periodic, environmental), so it covers every
+# school including physical. Only affects players who are currently scaled.
+# There is no buff icon; check it with .solocraft status or your combat log.
+#
+#    Solocraft.UseAura
+#        Description: Master switch for the reduction below. (The name is
+#                     historical; no aura is used.)
+#        Default:     1
+#
+#    Solocraft.DamageTakenReduction
+#        Description: Percent of ALL incoming damage removed while scaled
+#                     (0 - 95; capped at 95 so you can never be immune).
+#                     The main survivability lever for content tuned for a
+#                     full group. 40 is a reasonable solo starting point.
+#        Default:     0 - (Off)
+
 Solocraft.UseAura = 1
 Solocraft.DamageTakenReduction = 0
+
+###############################################################################
+# QUALITY OF LIFE  [core patch]
+#
+#    Solocraft.InstanceCorpsePersist  [core patch: patches/0001]
+#        Description: Keep killed mob corpses (and their loot) in an instance
+#                     until the instance resets instead of the normal decay,
+#                     so you can run back after a death and still loot, or
+#                     clear a big room before looting. Looted corpses also
+#                     stay, and instance mobs do not respawn until the
+#                     instance resets. Covers every kill, including pet and
+#                     guardian killing blows. Applies to all instance maps.
+#        Default:     0
+#
+#    Solocraft.PreventDurabilityLoss  [core patch: patches/0002]
+#        Description: Disable ALL durability loss, server-wide (death,
+#                     combat, everything). Meant for solo/family servers
+#                     where clearing hard content means dying a lot.
+#        Default:     0
+
+Solocraft.InstanceCorpsePersist = 0
+Solocraft.PreventDurabilityLoss = 0

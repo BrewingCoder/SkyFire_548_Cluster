@@ -1467,7 +1467,7 @@ void Creature::setDeathState(DeathState s)
         // including pet/guardian killing blows that the module's OnCreatureKill hook
         // cannot see. Same config key as the module, so one knob controls both.
         if (GetMap() && GetMap()->Instanceable() &&
-            sConfigMgr->GetBoolDefault("Solocraft.InstanceCorpsePersist", true))
+            sConfigMgr->GetBoolDefault("Solocraft.InstanceCorpsePersist", false))
             m_corpseRemoveTime = time(NULL) + WEEK;
         m_respawnTime = time(NULL) + m_respawnDelay + m_corpseDelay;
 
@@ -2293,7 +2293,7 @@ void Creature::AllLootRemovedFromCorpse()
     // mob the instant it is looted. Skip it in instances so looted corpses persist and
     // instance mobs do not respawn until the instance resets.
     if (GetMap() && GetMap()->Instanceable() &&
-        sConfigMgr->GetBoolDefault("Solocraft.InstanceCorpsePersist", true))
+        sConfigMgr->GetBoolDefault("Solocraft.InstanceCorpsePersist", false))
         return;
 
     if (!HasFlag(UNIT_FIELD_FLAGS, UNIT_FLAG_SKINNABLE))

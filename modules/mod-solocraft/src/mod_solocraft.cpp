@@ -39,9 +39,9 @@ namespace
         uint32 MinLevel = 1;
         bool  ScaleHealth = true;
         bool  Announce = true;
-        bool  InstanceCorpsePersist = true;  // keep mob corpses in instances until reset (loot after a death / clear-then-loot)
-        bool  PreventDurabilityLoss = false; // disable all durability loss server-wide (solo/family QoL; enforced by a core gate)
-        bool  UseAura = true;                // master toggle for the all-school incoming-damage reduction (name kept for config compat)
+        bool  InstanceCorpsePersist = false; // reported only; enforced by the optional core patch (patches/0001)
+        bool  PreventDurabilityLoss = false; // reported only; enforced by the optional core patch (patches/0002)
+        bool  UseAura = true;                // legacy name: master switch for the incoming-damage reduction below
         float DamageTakenReduction = 0.0f;   // % all-school incoming damage reduction while scaled; 0 = off
     };
 
@@ -66,7 +66,7 @@ namespace
         g_cfg.MinLevel    = uint32(sConfigMgr->GetIntDefault("Solocraft.MinLevel", 1));
         g_cfg.ScaleHealth = sConfigMgr->GetBoolDefault("Solocraft.ScaleHealth", true);
         g_cfg.Announce    = sConfigMgr->GetBoolDefault("Solocraft.Announce", true);
-        g_cfg.InstanceCorpsePersist = sConfigMgr->GetBoolDefault("Solocraft.InstanceCorpsePersist", true);
+        g_cfg.InstanceCorpsePersist = sConfigMgr->GetBoolDefault("Solocraft.InstanceCorpsePersist", false);
         g_cfg.PreventDurabilityLoss = sConfigMgr->GetBoolDefault("Solocraft.PreventDurabilityLoss", false);
         g_cfg.UseAura             = sConfigMgr->GetBoolDefault("Solocraft.UseAura", true);
         g_cfg.DamageTakenReduction = sConfigMgr->GetFloatDefault("Solocraft.DamageTakenReduction", 0.0f);
@@ -112,6 +112,12 @@ namespace
         g_applied.erase(it);
     }
 
+    uint32 ActiveCount()
+    {
+        std::lock_guard<std::mutex> lock(g_applied_mutex);
+        return uint32(g_applied.size());
+    }
+
     // Evaluate the player's current map and (re)apply the correct buff.
     void Evaluate(Player* player)
     {
@@ -124,9 +130,9 @@ namespace
             return;
 
         Map* map = player->GetMap();
-        // On this core MapEntry::IsDungeon() is MAP_DUNGEON only - raids are MAP_RAID (TrinityCore's
-        // IsDungeon() covers both, which is what this check originally assumed). Checking IsDungeon()
-        // alone silently skipped every raid, so Solocraft.Raids never had any effect.
+        // On SkyFire 5.4.8 MapEntry::IsDungeon() is MAP_DUNGEON only; raids are MAP_RAID. (On
+        // TrinityCore/AzerothCore IsDungeon() covers both, which is what the original module assumed;
+        // checking IsDungeon() alone here would silently never scale a raid.)
         if (!map || !(map->IsDungeon() || map->IsRaid()))
             return;
 
@@ -173,13 +179,8 @@ namespace
             g_applied[player->GetGUIDLow()] = { statPct, healthPct, armorPct, damagePct };
         }
 
-        // Incoming-damage reduction is applied in mod_solocraft_unitscript::OnDamage
-        // (DealDamage is the universal sink, so it covers physical/spell/periodic alike).
-        // The old approach rolled a carrier aura (32172) whose effects we tried to override
-        // via world.spelleffect_dbc -- but this core builds SpellInfo purely from the
-        // SpellEffect.dbc file and never reads that table, so the aura was a no-op (measured:
-        // not present client-side, periodic damage flat). Driving it in code fixes that and
-        // also covers physical melee, which MOD_DAMAGE_PERCENT_DONE excludes.
+        // Incoming-damage reduction is not a stat mod: it is applied per hit in
+        // mod_solocraft_unitscript::OnDamage, keyed on g_applied membership.
 
         if (g_cfg.ScaleHealth)
             player->SetFullHealth();
@@ -202,20 +203,11 @@ public:
     void OnMapChanged(Player* player) override { Evaluate(player); }
     void OnLogin(Player* player, bool /*firstLogin*/) override { Evaluate(player); }
 
-    // Keep mob corpses (and their loot) alive in instances until the instance resets, so a solo
-    // player can run back after a death and still loot, and can clear a room before looting it.
-    // setDeathState(JUST_DIED) has already set the normal corpse-remove time by the time this fires;
-    // we push it out so the corpse does not decay while players are still inside the instance.
-    // Note: only fires for direct player kills (pet/guardian killing blows go through a different path).
-    void OnCreatureKill(Player* /*killer*/, Creature* killed) override
-    {
-        if (!g_cfg.Enable || !g_cfg.InstanceCorpsePersist || !killed)
-            return;
-        Map* map = killed->GetMap();
-        if (!map || !map->Instanceable())
-            return;
-        killed->SetCorpseRemoveTime(time(NULL) + WEEK);   // effectively "until instance reset/unload"
-    }
+    // Instance corpse persistence and durability-loss prevention are NOT implemented here: no
+    // script hook can reach them cleanly (a module-side corpse timer is undone the moment the
+    // corpse is looted, which respawns the mob instantly). They live in the optional core
+    // patches under patches/ and read the same Solocraft.* config keys.
+
     void OnLogout(Player* player) override
     {
         if (!player)
@@ -225,9 +217,11 @@ public:
     }
 };
 
-// Incoming-damage reduction for scaled players. Unit::DealDamage is the single sink for
-// ALL damage (melee, spell, periodic/DoT, environmental), so this one hook mitigates every
-// type -- including physical, which an aura-based MOD_DAMAGE_PERCENT_DONE never could.
+// Incoming-damage reduction for scaled players. Unit::DealDamage is the single sink for ALL
+// damage (melee, spell, periodic/DoT, environmental), so this one hook mitigates every school,
+// including physical. (An aura approach can't: SkyFire builds SpellInfo from SpellEffect.dbc
+// only and ignores world.spelleffect_dbc overrides, and MOD_DAMAGE_PERCENT_TAKEN/DONE auras
+// would need a custom spell.)
 class mod_solocraft_unitscript : public UnitScript
 {
 public:
@@ -284,12 +278,13 @@ public:
             g_cfg.Enable ? "ENABLED" : "disabled",
             g_cfg.Dungeons ? "on" : "off", g_cfg.Raids ? "on" : "off",
             g_cfg.Balance, g_cfg.MaxMult, g_cfg.HealthMult, g_cfg.ArmorMult, g_cfg.DamageMult,
-            g_cfg.InstanceCorpsePersist ? "persist" : "decay", uint32(g_applied.size()));
+            g_cfg.InstanceCorpsePersist ? "persist (core patch)" : "decay", ActiveCount());
         handler->PSendSysMessage("  durability loss: %s | incoming-dmg reduction: %s -%.0f%% (code hook, all schools)",
-            g_cfg.PreventDurabilityLoss ? "DISABLED" : "normal",
+            g_cfg.PreventDurabilityLoss ? "DISABLED (core patch)" : "normal",
             (g_cfg.UseAura && g_cfg.DamageTakenReduction > 0.0f) ? "ON" : "off", g_cfg.DamageTakenReduction);
         if (Player* p = handler->GetSession() ? handler->GetSession()->GetPlayer() : NULL)
         {
+            std::lock_guard<std::mutex> lock(g_applied_mutex);
             std::unordered_map<uint32, AppliedMods>::iterator it = g_applied.find(p->GetGUIDLow());
             if (it != g_applied.end())
                 handler->PSendSysMessage("  You are scaled: +%.0f%% stats, +%.0f%% health, +%.0f%% armor, +%.0f%% weapon dmg.", it->second.statPct, it->second.healthPct, it->second.armorPct, it->second.damagePct);
